@@ -110,13 +110,12 @@ bash ~/.dsh/dsh-remote/install-supervisor.sh uninstall   # 卸载
 - 配置:`~/.dsh/dsh-remote/servers.json`(可用 `DSH_REMOTE_CONFIG` 换);模拟服务器 `servers.sim.json`
 - direct 模式(direct: true)在本机起实例,`DSH_HOME` 指向各自 `sim-homes/<名>`;dsh 二进制优先用 `DSH_BIN`,否则自动跟随 `~/.dsh/harness/current`
 
-## 7. 科研技能库(自用)
+## 7. 技能
 
 技能 = `~/.dsh/skills/<名字>/SKILL.md`(YAML frontmatter:`name`/`description` 必填,可选 `whenToUse`/`user-invocable`),**标准预设已自动挂载,写完实时生效,无需重启**。
 
 ```sh
-ls ~/.dsh/skills/            # 现有技能(aiops-primer/paper-reading/idea-feasibility/
-                             #  experiment-design/result-analysis/paper-writing)
+ls ~/.dsh/skills/            # 本仓库提供:gpu-partition(远程 GPU 工作分区模板)
 ```
 
 - 模型会在任务匹配技能描述时自动加载技能正文;你也可以在对话里点名要求用某个技能

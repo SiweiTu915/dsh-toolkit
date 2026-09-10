@@ -2,7 +2,9 @@
 
 围绕 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)的一组实用工具、插件与技能:让 dsh 这个 agent 框架**可升级、可迁移、可远程、可领域定制**。
 
-> DSH 本身是上游维护的引擎;这个仓库是围绕它的**用户侧工程层**——补上框架暂未提供的能力(升级管控、整体迁移、多机远程管理、历史消息修改、科研工作流技能)。
+中文 | [English](README.en.md)
+
+> DSH 本身是上游维护的引擎;这个仓库是围绕它的**用户侧工程层**——补上框架暂未提供的能力(升级管控、整体迁移、多机远程管理、历史消息修改、远程算力使用模板)。
 
 ## 组件
 
@@ -12,7 +14,7 @@
 | [`tools/migrate-dsh.mjs`](tools/migrate-dsh.mjs) | **整套迁移**:把数据/配置/插件/远程清单打包成一个归档,新机器一键还原(自动重写绝对路径、重装引擎、冒烟验证) |
 | [`dsh-remote/`](dsh-remote/) | **多服务器远程面板**:把每台服务器/分区管成一个独立 dsh 工作台;SSH 隧道 / 本机直启两种模式,带 Web 控制面板与本地常驻(supervisor) |
 | [`plugins/dsh-plugin-amend/`](plugins/dsh-plugin-amend/) | **示例插件**:修改历史对话(用 compaction 同款 surface-replace 机制,日志保持 append-only) |
-| [`skills/`](skills/) | **科研工作流技能**:读论文 → idea 可行性 → 实验设计 → 结果分析 → 论文写作,加领域速查与远程 GPU 分区模板 |
+| [`skills/gpu-partition`](skills/gpu-partition/) | **远程 GPU 工作分区模板**:让本机 agent 通过 ssh/rsync 读写远程文件、跑训练、取结果(含 SSH 别名与免密接入步骤) |
 | [`docs/USAGE.md`](docs/USAGE.md) | 命令速查(版本无关,升级后仍适用) |
 
 ## 快速开始
