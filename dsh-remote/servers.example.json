@@ -1,0 +1,26 @@
+{
+  "servers": [
+    {
+      "name": "example-remote",
+      "label": "示例·远程服务器（按需复制改名）",
+      "direct": false,
+      "host": "你的服务器IP或域名",
+      "user": "ssh用户名",
+      "sshPort": 22,
+      "dshPort": 3080,
+      "localPort": 3080,
+      "note": "远程服务器需先跑 install-remote.sh；本机经 SSH 隧道访问"
+    },
+    {
+      "name": "example-direct",
+      "label": "示例·本机直启（独立 DSH_HOME）",
+      "direct": true,
+      "host": "127.0.0.1",
+      "user": "local",
+      "dshPort": 3090,
+      "localPort": 3090,
+      "home": "~/.dsh/harness/profiles/example",
+      "note": "direct 模式在本机起实例；home 指向独立 DSH_HOME"
+    }
+  ]
+}

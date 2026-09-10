@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-remote 控制面板</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 24px; background: #f5f6f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1b1d21; color: #e6e6e6; }
+    .card { background: #26282e; border-color: #3a3d45; }
+    .muted { color: #9aa0aa; }
+    .meta, .modal label { color: #b0b6c0; }
+    .meta code, .badge.direct { background: #3a3d45; }
+    button { background: #3a3d45; color: #e6e6e6; }
+    button.primary { background: #4f7cff; color: #fff; }
+    .modal { background: rgba(0,0,0,.55); }
+    .modal-box { background: #26282e; border-color: #3a3d45; }
+    .modal input, .modal select, .modal textarea { background: #1b1d21; color: #e6e6e6; border-color: #3a3d45; }
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .muted { color: #6b7280; font-size: 13px; }
+  .toolbar { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; margin-top: 16px; }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 { font-size: 16px; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .card h2 .title { flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .dot.online { background: #22c55e; }
+  .dot.tunneling { background: #f59e0b; }
+  .dot.offline { background: #ef4444; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: #eef2ff; color: #4f46e5; font-weight: 600;
+  }
+  .badge.direct { background: #ecfdf5; color: #059669; }
+  .badge.ssh { background: #eef2ff; color: #4f46e5; }
+  .meta { font-size: 13px; color: #6b7280; line-height: 1.7; }
+  .meta code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  button {
+    border: none; border-radius: 8px; padding: 8px 14px; font-size: 13px;
+    cursor: pointer; background: #f3f4f6; color: #111;
+  }
+  button:hover { filter: brightness(0.95); }
+  button.primary { background: #2563eb; color: #fff; }
+  button.danger { background: #ef4444; color: #fff; }
+  button.ghost { background: transparent; border: 1px solid #d1d5db; }
+  .empty { margin-top: 40px; text-align: center; color: #9ca3af; }
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #111827; color: #fff; padding: 10px 18px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100;
+  }
+  #toast.show { opacity: 1; }
+
+  /* modal */
+  .modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.4);
+    display: none; align-items: flex-start; justify-content: center; padding: 48px 16px; z-index: 50;
+  }
+  .modal.open { display: flex; }
+  .modal-box {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 14px;
+    width: 100%; max-width: 560px; padding: 20px 24px;
+  }
+  .modal-box h3 { margin: 0 0 16px; font-size: 17px; }
+  .form-row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .form-row .field { flex: 1; }
+  .modal label { display: block; font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+  .modal input, .modal select, .modal textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px;
+    font-size: 13px; background: #fff;
+  }
+  .modal textarea { resize: vertical; min-height: 48px; }
+  .modal .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .modal .check input { width: auto; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  .modal-err { color: #ef4444; font-size: 13px; margin-bottom: 10px; min-height: 18px; }
+  .test-result { font-size: 12px; margin-top: 6px; line-height: 1.6; }
+  .test-result .ok { color: #059669; }
+  .test-result .bad { color: #ef4444; }
+</style>
+</head>
+<body>
+  <h1>dsh-remote 控制面板</h1>
+  <div class="muted">每台远程服务器一个独立的 DSH Web 窗口（不同端口）。<span id="metaLine"></span></div>
+
+  <div class="toolbar">
+    <button class="primary" onclick="openModal()">➕ 添加服务器</button>
+    <button onclick="doConnectAll()">🔌 全部连接</button>
+    <button onclick="doDisconnectAll()">⏹ 全部断开</button>
+    <button onclick="doRefresh()">🔄 刷新</button>
+    <span class="spacer"></span>
+    <button class="ghost" onclick="openConfig()">📄 打开配置文件</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">
+    服务器清单为空。点左上角"➕ 添加服务器"开始。
+  </div>
+
+  <!-- 新增/编辑模态框 -->
+  <div class="modal" id="modal">
+    <div class="modal-box">
+      <h3 id="modalTitle">添加服务器</h3>
+      <div class="modal-err" id="modalErr"></div>
+      <div class="form-row">
+        <div class="field"><label>名称（英文 id）*</label><input id="f-name" placeholder="research-gpu"></div>
+        <div class="field"><label>显示名</label><input id="f-label" placeholder="科研服务器"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>服务器地址 host</label><input id="f-host" placeholder="192.168.1.10"></div>
+        <div class="field"><label>SSH 用户名</label><input id="f-user" placeholder="alice"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>SSH 端口</label><input id="f-sshPort" type="number" value="22"></div>
+        <div class="field"><label>远程 dsh 端口</label><input id="f-dshPort" type="number" value="3080"></div>
+        <div class="field"><label>本地端口</label><input id="f-localPort" type="number" placeholder="同远程"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>平台</label>
+          <select id="f-platform">
+            <option value="linux">Linux</option>
+            <option value="windows">Windows</option>
+            <option value="macos">macOS</option>
+            <option value="local">本地</option>
+          </select>
+        </div>
+        <div class="field"><label>DSH_HOME（direct 模式）</label><input id="f-home" placeholder="留空用 ~/.dsh"></div>
+      </div>
+      <div class="form-row">
+        <div class="field check"><input type="checkbox" id="f-direct"><span>direct 模式（本机直接启动实例，跳过 SSH）</span></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>备注</label><input id="f-note" placeholder="GPU 服务器：arXiv MCP + 论文 skill"></div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="closeModal()">取消</button>
+        <button class="primary" onclick="saveModal()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+<script>
+const $grid = document.getElementById("grid");
+const $empty = document.getElementById("empty");
+let toastTimer;
+let editingName = null;
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function modeBadge(s) {
+  return s.direct ? '<span class="badge direct">direct</span>' : '<span class="badge ssh">ssh</span>';
+}
+
+async function refresh() {
+  try {
+    const [{ servers }, meta] = await Promise.all([api("/api/servers"), api("/api/meta")]);
+    document.getElementById("metaLine").textContent =
+      `配置文件: ${meta.configFile} · 面板端口: ${meta.panelPort}`;
+    $empty.style.display = servers.length ? "none" : "block";
+    $grid.innerHTML = servers.map(s => `
+      <div class="card">
+        <h2>
+          <span class="dot ${s.state}"></span>
+          <span class="title">${esc(s.label || s.name)} ${modeBadge(s)}</span>
+        </h2>
+        <div class="meta">
+          <div><code>${esc(s.name)}</code>${s.direct ? "" : ` · ${esc(s.user)}@${esc(s.host)}`}</div>
+          <div>${s.direct
+            ? `本地实例 :${s.dshPort}${s.home ? ` · DSH_HOME=${esc(s.home)}` : ""}`
+            : `SSH :${s.sshPort} → 远程 :${s.dshPort} → 本地 :${s.localPort}`}</div>
+          ${s.note ? `<div>${esc(s.note)}</div>` : ""}
+          <div class="test-result" id="test-${esc(s.name)}"></div>
+        </div>
+        <div class="btns">
+          <button class="primary" onclick="doConnect('${esc(s.name)}')">🔌 连接</button>
+          <button onclick="doOpen('${esc(s.name)}')">🌐 打开窗口</button>
+          <button onclick="doTest('${esc(s.name)}')">🧪 测试</button>
+          <button onclick="doSetupKey('${esc(s.name)}')">🔑 部署密钥</button>
+          <button onclick="doInitServer('${esc(s.name)}')">⚡ 初始化</button>
+          <button onclick="doCopy('${esc(s.name)}')">📋 复制地址</button>
+          <button onclick="doDisconnect('${esc(s.name)}')">⏹ 断开</button>
+          <button onclick="openModal('${esc(s.name)}')">✏️ 编辑</button>
+          <button class="danger" onclick="doRemove('${esc(s.name)}')">🗑</button>
+        </div>
+      </div>
+    `).join("");
+  } catch (e) {
+    toast("加载失败: " + e.message);
+  }
+}
+
+async function doConnect(name) {
+  toast(`连接 ${name}…（首次启动需十几秒）`);
+  try {
+    const r = await api("/api/connect?name=" + encodeURIComponent(name));
+    if (r.result && r.result.ready === false) {
+      const s = (await api("/api/servers")).servers.find(x => x.name === name);
+      toast(s && !s.direct
+        ? `✗ ${name} 隧道未就绪：点「🔑 部署密钥」配免密，再「⚡ 初始化」装 dsh，然后重连`
+        : `✗ ${name} 连接失败：端口未打开。点"🧪 测试"排查`);
+    } else {
+      toast(`✓ ${name} 已连接`);
+    }
+  } catch (e) { toast("连接失败: " + e.message); }
+  refresh();
+}
+async function doConnectAll() {
+  toast("正在连接全部服务器…");
+  try {
+    const { results } = await api("/api/connect-all");
+    const failed = results.filter(r => !r.ready);
+    toast(failed.length ? `⚠ ${failed.length} 台连接失败` : `✓ 全部连接成功 (${results.length})`);
+  } catch (e) { toast("批量连接失败: " + e.message); }
+  refresh();
+}
+async function doDisconnectAll() {
+  await api("/api/disconnect-all");
+  toast("已全部断开");
+  refresh();
+}
+async function doDisconnect(name) {
+  await api("/api/disconnect?name=" + encodeURIComponent(name));
+  toast(`已断开 ${name}`);
+  refresh();
+}
+async function doOpen(name) {
+  try {
+    const r = await api("/api/open?name=" + encodeURIComponent(name));
+    toast(`已打开 ${r.opened}`);
+  } catch (e) { toast("打开失败: " + e.message); }
+}
+async function doCopy(name) {
+  const { servers } = await api("/api/servers");
+  const s = servers.find(x => x.name === name);
+  if (!s) return;
+  try {
+    await navigator.clipboard.writeText(s.url);
+    toast(`已复制 ${s.url}`);
+  } catch {
+    toast(`地址: ${s.url}`);
+  }
+}
+async function doTest(name) {
+  const box = document.getElementById("test-" + esc(name));
+  box.innerHTML = "测试中…";
+  try {
+    const { checks } = await api("/api/test?name=" + encodeURIComponent(name));
+    box.innerHTML = checks.map(c =>
+      `<div class="${c.ok ? "ok" : "bad"}">${c.ok ? "✓" : "✗"} ${esc(c.name)} :${c.port} — ${esc(c.detail)}</div>`
+    ).join("");
+  } catch (e) {
+    box.innerHTML = `<div class="bad">✗ 测试失败: ${esc(e.message)}</div>`;
+  }
+}
+async function doSetupKey(name) {
+  const password = prompt(`输入 ${name} 的实例 SSH 密码（一次性，仅用于部署公钥，不保存）:\n如果已配过免密可直接取消，面板会自动检测`);
+  try {
+    const r = await api("/api/setup-key", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, password: password ?? "" }),
+    });
+    toast(r.note ? `✅ ${r.note}` : "✅ 密钥部署完成");
+  } catch (e) { toast("❌ " + e.message); }
+  refresh();
+}
+async function doInitServer(name) {
+  if (!confirm(`在 ${name} 上执行安装?\n= 检查 Node → 装 @deepseek-ai/dsh → 注册常驻服务(dsh web 只绑 127.0.0.1)\n(需先完成 🔑 部署密钥)`)) return;
+  try {
+    const r = await api("/api/init-server", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    alert(r.output ?? "✅ 初始化完成");
+  } catch (e) { alert("❌ " + e.message); }
+  refresh();
+}
+async function doRemove(name) {
+  if (!confirm(`删除服务器 "${name}"？（只移除清单与隧道，不触碰远程数据）`)) return;
+  await api("/api/remove?name=" + encodeURIComponent(name));
+  toast(`已删除 ${name}`);
+  refresh();
+}
+function doRefresh() { refresh(); }
+function openConfig() {
+  api("/api/meta").then(m => {
+    window.open("file://" + m.configFile, "_blank");
+  }).catch(() => toast("无法打开配置文件"));
+}
+
+/* ── 模态框 ── */
+function openModal(name) {
+  editingName = name || null;
+  document.getElementById("modalErr").textContent = "";
+  document.getElementById("modalTitle").textContent = name ? `编辑 ${name}` : "添加服务器";
+  const form = {
+    "f-name": "", "f-label": "", "f-host": "", "f-user": "", "f-sshPort": "22",
+    "f-dshPort": "3080", "f-localPort": "", "f-platform": "linux", "f-home": "",
+    "f-note": "", "f-direct": false,
+  };
+  if (name) {
+    api("/api/servers").then(({ servers }) => {
+      const s = servers.find(x => x.name === name);
+      if (!s) return;
+      form["f-name"] = s.name; form["f-label"] = s.label || ""; form["f-host"] = s.host || "";
+      form["f-user"] = s.user || ""; form["f-sshPort"] = String(s.sshPort ?? 22);
+      form["f-dshPort"] = String(s.dshPort ?? 3080); form["f-localPort"] = s.localPort != null && s.localPort !== s.dshPort ? String(s.localPort) : "";
+      form["f-platform"] = s.platform || "linux"; form["f-home"] = s.home || "";
+      form["f-note"] = s.note || ""; form["f-direct"] = Boolean(s.direct);
+      fillForm(form);
+      document.getElementById("modal").classList.add("open");
+    });
+    return;
+  }
+  fillForm(form);
+  document.getElementById("modal").classList.add("open");
+}
+function fillForm(form) {
+  for (const [id, val] of Object.entries(form)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = Boolean(val);
+    else el.value = String(val ?? "");
+  }
+}
+function closeModal() {
+  document.getElementById("modal").classList.remove("open");
+  editingName = null;
+}
+async function saveModal() {
+  const body = {
+    name: document.getElementById("f-name").value.trim(),
+    label: document.getElementById("f-label").value.trim(),
+    host: document.getElementById("f-host").value.trim(),
+    user: document.getElementById("f-user").value.trim(),
+    sshPort: Number(document.getElementById("f-sshPort").value || 22),
+    dshPort: Number(document.getElementById("f-dshPort").value || 3080),
+    localPort: document.getElementById("f-localPort").value ? Number(document.getElementById("f-localPort").value) : undefined,
+    platform: document.getElementById("f-platform").value,
+    home: document.getElementById("f-home").value.trim(),
+    note: document.getElementById("f-note").value.trim(),
+    direct: document.getElementById("f-direct").checked,
+  };
+  try {
+    if (editingName) {
+      await api("/api/servers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(`✓ 已保存 ${body.name}`);
+    } else {
+      await api("/api/servers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      toast(`✓ 已添加 ${body.name}`);
+    }
+    closeModal();
+    refresh();
+  } catch (e) {
+    document.getElementById("modalErr").textContent = e.message;
+  }
+}
+
+document.getElementById("modal").addEventListener("click", (e) => {
+  if (e.target.id === "modal") closeModal();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+refresh();
+setInterval(refresh, 8000);
+</script>
+</body>
+</html>
