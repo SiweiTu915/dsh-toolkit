@@ -1,7 +1,5 @@
 # dsh-toolkit
 
-A record of the changes I made to DeepSeek Harness (`dsh`). Not an open-source project — a personal archive.
-
 [中文](README.md)
 
 | Project | Description |

@@ -1,7 +1,5 @@
 # dsh-toolkit
 
-我对 DeepSeek Harness(`dsh`)所做改造的记录。非开源项目,自用留档。
-
 [English](README.en.md)
 
 | 项目 | 说明 |
