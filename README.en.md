@@ -3,8 +3,6 @@
 A set of utilities, plugins and skills built around [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) — making the agent framework **upgradable, migratable, remote-capable and domain-adaptable**.
 
 > DSH itself is the upstream-maintained engine. This repository is the **user-side engineering layer** around it: it fills capabilities the framework does not ship yet (upgrade management, whole-workbench migration, multi-server remote control, message amendment, remote-GPU usage templates).
->
-> **This repository is where I maintain my own modifications and upgrades to DSH long-term.** New capabilities follow the structure described in [docs/MAINTAINING.md](docs/MAINTAINING.md) (Chinese).
 
 [中文文档](README.md) | English
 
