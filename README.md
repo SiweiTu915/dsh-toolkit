@@ -1,44 +1,55 @@
 # dsh-toolkit
 
-围绕 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)的一组实用工具、插件与技能:让 dsh 这个 agent 框架**可升级、可迁移、可远程、可领域定制**。
+我自己用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)时攒下来的一些工具、插件和技能。
 
-中文 | [English](README.en.md)
+不是框架,也不是给别人用的产品——就是我在自己机器上折腾 dsh 的过程里,把反复要用的东西慢慢整理成了脚本,顺手放上来。**自用为主,按需自取;不保证通用,也不提供支持。**
 
-> DSH 本身是上游维护的引擎;这个仓库是围绕它的**用户侧工程层**——补上框架暂未提供的能力(升级管控、整体迁移、多机远程管理、历史消息修改、远程算力使用模板)。
+[English](README.en.md)
 
-## 组件
+## 为什么会有这些
 
-| 组件 | 作用 |
+dsh 还在 rc/alpha 阶段,升个版本容易踩坑,换台机器又要重新配一遍。于是挨个补上了我最需要的几件事:
+
+- **`tools/update-dsh.mjs`** —— 升级不再靠运气:先备份,再预取新版本,冒烟跑一遍,对比一下配置 diff,确认了才切换;不满意一条命令回滚。顺便支持了 `alpha` 这类通道,以及清理旧版本。
+- **`tools/migrate-dsh.mjs`** —— 换机器/上服务器时,把会话、设置、插件、远程清单整个打包带走,到新机器一键还原。
+- **`dsh-remote/`** —— 手上不止一台机器,想让每台都是一个独立工作台,从一个面板统一连、开、看状态。
+- **`plugins/dsh-plugin-amend/`** —— 有时候想改历史对话里的一句话,又不想破坏 append-only 的日志,就拿 compaction 那套 surface-replace 机制试了一个。
+- **`skills/gpu-partition/`** —— 远程 GPU 机器只当算力用,让本机 agent 自己 ssh/rsync 把活干了;这个是从我自己那套改出来的模板。
+
+## 目录
+
+| 路径 | 是什么 |
 |---|---|
-| [`tools/update-dsh.mjs`](tools/update-dsh.mjs) | **版本更新管控**:受管安装(不依赖 npx 缓存)、备份 → 预取 → 冒烟 → 配置 diff → 切换 → 可回滚;支持多通道(latest/next/alpha)、`prune` 清理旧版本 |
-| [`tools/migrate-dsh.mjs`](tools/migrate-dsh.mjs) | **整套迁移**:把数据/配置/插件/远程清单打包成一个归档,新机器一键还原(自动重写绝对路径、重装引擎、冒烟验证) |
-| [`dsh-remote/`](dsh-remote/) | **多服务器远程面板**:把每台服务器/分区管成一个独立 dsh 工作台;SSH 隧道 / 本机直启两种模式,带 Web 控制面板与本地常驻(supervisor) |
-| [`plugins/dsh-plugin-amend/`](plugins/dsh-plugin-amend/) | **示例插件**:修改历史对话(用 compaction 同款 surface-replace 机制,日志保持 append-only) |
-| [`skills/gpu-partition`](skills/gpu-partition/) | **远程 GPU 工作分区模板**:让本机 agent 通过 ssh/rsync 读写远程文件、跑训练、取结果(含 SSH 别名与免密接入步骤) |
-| [`docs/USAGE.md`](docs/USAGE.md) | 命令速查(版本无关,升级后仍适用) |
+| `tools/update-dsh.mjs` | 版本更新管控(受管安装 / 更新 / 回滚 / 清理旧版本) |
+| `tools/migrate-dsh.mjs` | 整套工作台打包与还原 |
+| `dsh-remote/` | 多服务器远程面板(SSH 隧道 或 本机直启;带 Web 面板与常驻服务) |
+| `plugins/dsh-plugin-amend/` | 插件示例:修改历史消息(日志保持 append-only) |
+| `skills/gpu-partition/` | 远程 GPU 工作分区模板(ssh/rsync) |
+| `docs/USAGE.md` | 命令速查,版本升级后基本还能用 |
 
-## 快速开始
+## 怎么用
 
-需要 **Node 22+** 与一个可用的 `dsh`。
+需要 **Node 22+** 和一个能跑的 `dsh`。
 
 ```sh
 git clone <this-repo> && cd dsh-toolkit
 
-# 1) 版本更新管控
-node tools/update-dsh.mjs status     # 看当前/最新版本与各 dist-tag
+node tools/update-dsh.mjs status     # 看看现在是哪个版本、有哪些通道
 node tools/update-dsh.mjs update     # 备份→预取→冒烟→diff→确认→切换
-node tools/update-dsh.mjs rollback   # 一键回滚
+node tools/update-dsh.mjs rollback   # 出问题就回滚
 
-# 2) 迁移(换机器 / 上服务器)
-node tools/migrate-dsh.mjs pack      # 打包 → 得到 dsh-migrate-*.tar.gz
-node tools/migrate-dsh.mjs restore <归档>   # 在目标机器还原
+node tools/migrate-dsh.mjs pack              # 打包(得到 dsh-migrate-*.tar.gz)
+node tools/migrate-dsh.mjs restore <归档>     # 在目标机器还原
+```
 
-# 3) 远程面板(可选:本地常驻)
+远程面板(可选装成常驻):
+
+```sh
 bash dsh-remote/install-supervisor.sh install
 node dsh-remote/cli.mjs list / connect <名字> / open <名字>
 ```
 
-技能:把 `skills/*` 拷到 `$DSH_HOME/skills/`(默认 `~/.dsh/skills/`)即被自动发现(标准 agent 预设已挂载 skill 提供者,无需改配置)。
+技能:把 `skills/*` 拷到 `$DSH_HOME/skills/`(默认 `~/.dsh/skills/`)就会被自动发现,不用改配置。
 
 插件:
 
@@ -46,20 +57,16 @@ node dsh-remote/cli.mjs list / connect <名字> / open <名字>
 cd ~/.dsh && dsh plugin --profile web add <本仓库路径>/plugins/dsh-plugin-amend
 ```
 
-## 设计原则
+## 一些实话
 
-- **引擎与用户层分离**:框架本质交给上游;这里只做用户侧能力,不 fork、不改核心
-- **数据优先**:会话/配置/插件是纯文件,升级与迁移都不动它们(升级前自动备份、可回滚)
-- **一切先验证再切换**:升级/迁移都带冒烟测试与配置 diff,失败不切换
-- **零依赖**:工具全部只用 Node 内置模块;远程面板只用 ssh/rsync 与系统自带能力
+- 我在 **macOS(Apple Silicon)** 上用的,工具只在 macOS/Linux 试过,Windows 没测
+- 全部零依赖,只用 Node 内置模块;远程面板也只用 ssh/rsync 和系统自带的东西
+- **dsh 还在快速迭代**,上游一变这些东西可能就得跟着改;我按自己的需要修,不承诺兼容
+- 有些坑我踩过并记在下面,省得你重踩:
+  - `dsh-plugin-amend` 目前只支持**替换消息文本**(删除/恢复没做);UI 上显示修改还需要客户端 Definition
+  - `dsh-remote` 的隧道模式**必须免密 SSH**——后台连接没法输密码
+  - 在 **macOS 26 + Apple Silicon** 上想把远程目录做成**真·系统挂载**(WebDAV / SMB / FUSE-T)基本走不通(系统限制 + 上游 bug),别在这上面浪费时间,看远程文件直接用 VS Code Remote-SSH
 
-## 已知限制
+## License
 
-- 工具面向 macOS/Linux(Windows 未验证)
-- `dsh-plugin-amend` 只支持替换消息文本(删除/恢复未实现);UI 层显示修改需要客户端 Definition(见该插件 README)
-- `dsh-remote` 的隧道模式要求免密 SSH(非交互后台连接无法输入密码)
-- macOS 26(Apple Silicon)上把远程目录做**真·系统挂载**(WebDAV/SMB/FUSE-T)存在系统限制与上游 bug,本仓库不提供挂载方案;远程文件浏览建议用 VS Code Remote-SSH
-
-## 许可证
-
-MIT(见 [LICENSE](LICENSE))
+MIT,随便用 —— 见 [LICENSE](LICENSE)
