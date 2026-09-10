@@ -25,7 +25,6 @@ dsh 还在 rc/alpha 阶段,升个版本容易踩坑,换台机器又要重新配�
 | `dsh-remote/` | 多服务器远程面板(SSH 隧道 或 本机直启;带 Web 面板与常驻服务) |
 | `plugins/dsh-plugin-amend/` | 插件示例:修改历史消息(日志保持 append-only) |
 | `skills/gpu-partition/` | 远程 GPU 工作分区模板(ssh/rsync) |
-| `docs/USAGE.md` | 命令速查,版本升级后基本还能用 |
 
 ## 怎么用
 

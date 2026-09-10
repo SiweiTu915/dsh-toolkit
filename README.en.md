@@ -25,7 +25,6 @@ dsh is still in rc/alpha, so an upgrade can easily break something and a new mac
 | `dsh-remote/` | Multi-server remote panel (SSH tunnel or local direct; web UI + resident service) |
 | `plugins/dsh-plugin-amend/` | Example plugin: amend history while keeping the log append-only |
 | `skills/gpu-partition/` | Remote-GPU workspace template (ssh/rsync) |
-| `docs/USAGE.md` | Command cheat-sheet, mostly still valid after upgrades (Chinese) |
 
 ## Usage
 
