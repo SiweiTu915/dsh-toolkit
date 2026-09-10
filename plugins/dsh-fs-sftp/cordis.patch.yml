@@ -1,0 +1,14 @@
+# dsh-fs-sftp 的 bundle 层:用一个远程 fs provider 顶掉本地 provider。
+#
+# ctx.fs 的服务名固定是 "fs"(FileSystem 构造里 super(ctx, "fs")),全局单例。
+# 所以必须先禁用 dsh-base 挂上去的 `fs-sandbox`(它继承本地 LocalFileSystem),
+# 再用 insert 挂上 SFTP 版本 —— 否则两个 provider 抢同一个服务名。
+#
+# 配置不写在这里:provider 读 <DSH_HOME>/fs-sftp.json(每个分区各一份),
+# 这样同一个包能装进不同分区、连不同的机器。
+- id: fs-sandbox
+  disabled: true
+
+- insert:
+    - id: fs-sftp
+      name: 'dsh-fs-sftp'

@@ -63,6 +63,11 @@
   }
   #toast.show { opacity: 1; }
 
+  /* 新建工作台的步骤进度 */
+  .steps { margin: 8px 0; font-size: 12px; line-height: 1.8; max-height: 190px; overflow: auto; }
+  .steps .ok { color: #059669; }
+  .steps .bad { color: #dc2626; }
+
   /* modal */
   .modal {
     position: fixed; inset: 0; background: rgba(0,0,0,.4);
@@ -97,6 +102,7 @@
 
   <div class="toolbar">
     <button class="primary" onclick="openModal()">➕ 添加服务器</button>
+    <button class="primary" onclick="openWorkbench()">🖥️ 新建远程工作台</button>
     <button onclick="doConnectAll()">🔌 全部连接</button>
     <button onclick="doDisconnectAll()">⏹ 全部断开</button>
     <button onclick="doRefresh()">🔄 刷新</button>
@@ -152,6 +158,35 @@
   </div>
 
   <div id="toast"></div>
+
+  <!-- 新建远程工作台:一个分区,读/写/bash/搜索全部在远程执行,本机零拷贝 -->
+  <div class="modal" id="wbModal">
+    <div class="modal-box">
+      <h3>新建远程挂载工作台</h3>
+      <div class="muted" style="font-size:12px;line-height:1.7;margin-bottom:14px">
+        建一个独立分区:该分区里的 <b>read / write / edit</b>、<b>bash</b>、<b>glob / grep</b>
+        全部在远程机器上执行。本机只留一个 <b>0 字节</b>的挂载点,不落任何文件副本。
+      </div>
+      <div class="modal-err" id="wbErr"></div>
+      <div class="form-row">
+        <div class="field"><label>机器(取它的 SSH 连接)</label><select id="w-source"></select></div>
+        <div class="field"><label>工作台名称(英文 id)</label><input id="w-name" placeholder="my-gpu"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>远程根目录</label><input id="w-remoteRoot" value="/root"></div>
+        <div class="field"><label>本机端口(留空自动挑)</label><input id="w-port" type="number"></div>
+      </div>
+      <div class="form-row">
+        <div class="field"><label>显示名(可选)</label><input id="w-label" placeholder="GPU 工作台"></div>
+      </div>
+      <div class="muted" id="wbPreview" style="font-size:12px;line-height:1.7;margin:6px 0"></div>
+      <div class="steps" id="wbSteps"></div>
+      <div class="modal-actions">
+        <button onclick="closeWorkbench()">取消</button>
+        <button class="primary" id="wbGo" onclick="doCreateWorkbench()">创建并启动</button>
+      </div>
+    </div>
+  </div>
 
 <script>
 const $grid = document.getElementById("grid");
@@ -316,6 +351,104 @@ function openConfig() {
   }).catch(() => toast("无法打开配置文件"));
 }
 
+/* ── 新建远程工作台 ── */
+async function openWorkbench() {
+  document.getElementById("wbErr").textContent = "";
+  document.getElementById("wbSteps").innerHTML = "";
+  document.getElementById("wbPreview").innerHTML = "";
+  document.getElementById("wbModal").classList.add("open");
+  await loadWorkbenchPlan();
+}
+
+function closeWorkbench() {
+  document.getElementById("wbModal").classList.remove("open");
+}
+
+async function loadWorkbenchPlan() {
+  try {
+    // 不带参数:拿到机器清单 + 建议端口
+    const r = await api("/api/workbench/plan");
+    const usable = r.servers.filter(s => s.remote);
+    document.getElementById("w-source").innerHTML = usable.length
+      ? usable.map(s => `<option value="${esc(s.name)}">${esc(s.label || s.name)}${s.hasConn ? "" : "(无 conn,靠 ssh 别名)"}</option>`).join("")
+      : `<option value="">(没有可作远程目标的机器 —— 先添加一台远程服务器)</option>`;
+    // 端口留空即自动挑,这里只展示建议值
+    document.getElementById("w-port").placeholder = `自动: ${r.suggestedPort}`;
+    if (!document.getElementById("w-name").value) {
+      document.getElementById("w-name").value = usable.length ? `${usable[0].name}-ws` : "";
+    }
+    await refreshWorkbenchPreview();
+  } catch (e) {
+    document.getElementById("wbErr").textContent = e.message;
+  }
+}
+
+async function refreshWorkbenchPreview() {
+  const name = document.getElementById("w-name").value.trim();
+  const remoteRoot = document.getElementById("w-remoteRoot").value.trim();
+  const $pv = document.getElementById("wbPreview");
+  if (!name || !remoteRoot) { $pv.innerHTML = ""; return; }
+  try {
+    const r = await api(`/api/workbench/plan?name=${encodeURIComponent(name)}&remoteRoot=${encodeURIComponent(remoteRoot)}`);
+    $pv.innerHTML = `将创建:<br>`
+      + `　分区目录 <code>${esc(r.plan.home)}</code><br>`
+      + `　挂载点 <code>${esc(r.plan.mountRoot)}</code>(0 字节,本机真实目录)<br>`
+      + `　映射 <code>${esc(r.plan.remoteRoot)}</code> ⇄ 挂载点<br>`
+      + `　插件 ${r.plan.plugins.map(esc).join(" + ")}`;
+  } catch (e) {
+    $pv.innerHTML = `<span style="color:#dc2626">${esc(e.message)}</span>`;
+  }
+}
+
+function renderWorkbenchSteps(steps) {
+  document.getElementById("wbSteps").innerHTML = (steps || []).map(s =>
+    `<div class="${s.ok ? "ok" : "bad"}">${s.ok ? "✓" : "✗"} ${esc(s.title)}`
+    + (s.detail ? ` <span class="muted">— ${esc(s.detail)}</span>` : "") + `</div>`
+  ).join("");
+}
+
+async function doCreateWorkbench() {
+  const btn = document.getElementById("wbGo");
+  const err = document.getElementById("wbErr");
+  err.textContent = "";
+  document.getElementById("wbSteps").innerHTML = "";
+  btn.disabled = true;
+  btn.textContent = "创建中…（约 10~30 秒）";
+  try {
+    const payload = {
+      source: document.getElementById("w-source").value,
+      name: document.getElementById("w-name").value.trim(),
+      remoteRoot: document.getElementById("w-remoteRoot").value.trim(),
+      port: Number(document.getElementById("w-port").value) || undefined,
+      label: document.getElementById("w-label").value.trim(),
+    };
+    // 不用 api():失败时后端会在 body 里带 steps / diagnosis,api() 会把它们丢掉
+    const res = await fetch("/api/workbench", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const r = await res.json().catch(() => ({}));
+    renderWorkbenchSteps(r.steps);
+    if (!res.ok) {
+      err.textContent = r.error || `HTTP ${res.status}`;
+      if (r.diagnosis) {
+        document.getElementById("wbSteps").innerHTML +=
+          `<div class="bad" style="margin-top:6px">启动日志(尾部):</div>`
+          + `<pre class="muted" style="white-space:pre-wrap;font-size:11px;margin:2px 0">${esc(r.diagnosis)}</pre>`;
+      }
+      return;
+    }
+    toast(`✓ 工作台 ${payload.name} 已就绪 → ${r.url}`);
+    setTimeout(() => { closeWorkbench(); refresh(); }, 1500);
+  } catch (e) {
+    err.textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "创建并启动";
+  }
+}
+
 /* ── 模态框 ── */
 function openModal(name) {
   editingName = name || null;
@@ -387,7 +520,19 @@ async function saveModal() {
 document.getElementById("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") closeModal();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeModal(); closeWorkbench(); } });
+
+// 工作台表单:改了名字/远程目录就刷新预览;换机器就跟着改默认名字
+document.getElementById("w-name").addEventListener("input", refreshWorkbenchPreview);
+document.getElementById("w-remoteRoot").addEventListener("input", refreshWorkbenchPreview);
+document.getElementById("w-source").addEventListener("change", (e) => {
+  const $name = document.getElementById("w-name");
+  if (!$name.value || /-ws$/.test($name.value)) $name.value = `${e.target.value}-ws`;
+  refreshWorkbenchPreview();
+});
+document.getElementById("wbModal").addEventListener("click", (e) => {
+  if (e.target.id === "wbModal") closeWorkbench();
+});
 
 refresh();
 setInterval(refresh, 8000);

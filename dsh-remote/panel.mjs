@@ -7,13 +7,16 @@
  *
  * 页面提供: 服务器清单 / 一键建隧道 / 一键打开窗口 / 状态探测 / 添加删除
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync, openSync, closeSync } from "node:fs";
 import { createConnection } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { connect as sftpConnect } from "./lib/sftp.mjs";
+import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
+import { createWorkbench, planWorkbench, rollbackWorkbench, pickFreePort } from "./workbench.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const CONFIG = process.env.DSH_REMOTE_CONFIG
@@ -23,6 +26,49 @@ const STATE_DIR = join(ROOT, ".state");
 const PIDS_FILE = join(STATE_DIR, "tunnels.json");
 
 const PANEL_PORT = Number(process.argv.find((a, i) => process.argv[i - 1] === "--port") ?? 4100);
+
+// ── 远程文件浏览:SFTP 连接缓存(60 秒空闲自动断开) ──────────────────────
+const fileConns = new Map(); // 机器名 → { conn, timer }
+
+function dropFileConn(name) {
+  const c = fileConns.get(name);
+  if (!c) return;
+  clearTimeout(c.timer);
+  try { c.conn.end(); } catch { /* ignore */ }
+  fileConns.delete(name);
+}
+
+async function getFileConn(name) {
+  const hit = fileConns.get(name);
+  if (hit) {
+    clearTimeout(hit.timer);
+    hit.timer = setTimeout(() => dropFileConn(name), 60000);
+    hit.timer.unref?.();
+    return hit.conn;
+  }
+  const s = loadServers().find((x) => x.name === name);
+  if (!s) throw new Error(`未找到机器 "${name}"`);
+  const cfg = resolveConn(s, {});
+  const conn = await sftpConnect({ ...cfg, machineId: name });
+  const timer = setTimeout(() => dropFileConn(name), 60000);
+  timer.unref?.();
+  fileConns.set(name, { conn, timer });
+  return conn;
+}
+
+/** 只列出配置了 SSH 连接信息的机器(供文件浏览器使用)。 */
+function machinesWithConn() {
+  const out = [];
+  for (const s of loadServers()) {
+    try {
+      const c = resolveConn(s, {});
+      out.push({ name: s.name, label: s.label || s.name, host: c.host, port: c.port, user: c.user });
+    } catch { /* 无连接信息,跳过 */ }
+  }
+  return out;
+}
+
+const MAX_READ_BYTES = 512 * 1024;
 
 function loadServers() {
   const raw = JSON.parse(readFileSync(CONFIG, "utf8"));
@@ -64,6 +110,7 @@ function validateServer(input, { existingNames = [], selfName = null } = {}) {
   if (errors.length) return { error: errors.join("；") };
   return {
     value: {
+      ...s,                      // 保留扩展字段(conn / mirror / 以后新增的),避免面板保存时被剥掉
       name,
       label: String(s.label ?? "").trim() || name,
       direct: Boolean(s.direct),
@@ -217,6 +264,16 @@ function findDshBin() {
   return "dsh"; // 最后兜底，让 spawn 报错更直观
 }
 
+/** 启动输出落盘:实例崩溃时才有得查(以前 stdio:'ignore' 完全看不到原因)。 */
+function bootLogPath(name) { return join(STATE_DIR, `boot-${name}.log`); }
+function bootLogTail(name, lines = 14) {
+  const file = bootLogPath(name);
+  if (!existsSync(file)) return "";
+  try {
+    return readFileSync(file, "utf8").trimEnd().split("\n").slice(-lines).join("\n");
+  } catch { return ""; }
+}
+
 /** direct 模式：本机直接启动/管理一个 dsh web 实例。 */
 async function startDirect(s) {
   const pids = loadPids();
@@ -230,12 +287,20 @@ async function startDirect(s) {
   }
   const bin = findDshBin();
   const dshHome = s.home || join(homedir(), ".dsh");
+  mkdirSync(STATE_DIR, { recursive: true });
+  let stdio = "ignore";
+  let fd = null;
+  try {
+    fd = openSync(bootLogPath(s.name), "a");
+    stdio = ["ignore", fd, fd];
+  } catch { /* 打不开日志就退回 ignore */ }
   const child = spawn(process.execPath, [bin, "web", "--port", String(s.dshPort)], {
-    stdio: "ignore",
+    stdio,
     detached: true,
     env: { ...process.env, DSH_HOME: dshHome },
   });
   child.unref();
+  if (fd !== null) { try { closeSync(fd); } catch { /* 已关 */ } }
   pids[s.name] = child.pid;
   savePids(pids);
   return { ok: true, msg: `实例启动 (pid ${child.pid}, DSH_HOME=${dshHome})` };
@@ -282,8 +347,15 @@ async function testServer(s) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PANEL_PORT}`);
+  // 允许本机工作台(3080/3090 等)的页面直接调用本面板的 /api/rw/*(仅监听回环,风险可控)
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+  if (req.method === "OPTIONS") { res.writeHead(204, cors); res.end(); return; }
   const send = (code, obj) => {
-    res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+    res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", ...cors });
     res.end(JSON.stringify(obj));
   };
   try {
@@ -440,6 +512,226 @@ const server = createServer(async (req, res) => {
         send(200, { ok: true, output: tail || "初始化完成" });
       } catch (e) {
         send(400, { error: String(e?.message ?? e) });
+      }
+      return;
+    }
+
+    // ── 一键创建「远程挂载工作台」─────────────────────────────────────────
+    // 一个工作台 = 独立 DSH_HOME + web profile + 三个远程 provider(fs/subprocess/bash)
+    // + 挂载配置 + 本机端口。建完这个分区的 read/write/edit/bash/glob/grep 全在远程跑。
+    if (url.pathname === "/api/workbench/plan") {
+      const servers = loadServers();
+      const used = servers.flatMap((s) => [s.dshPort, s.localPort]).filter(Boolean);
+      const source = url.searchParams.get("source") || "";
+      const base = source.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-|-$/g, "") || "remote";
+      const name = (url.searchParams.get("name") || `${base}-ws`).trim();
+      try {
+        const plan = await planWorkbench({
+          name,
+          remoteRoot: url.searchParams.get("remoteRoot") || "/root",
+        }, { mainHome: DSH_HOME });
+        send(200, {
+          plan: { name: plan.name, home: plan.home, mountRoot: plan.mountRoot, plugins: plan.plugins, remoteRoot: plan.remoteRoot },
+          suggestedPort: await pickFreePort(used),
+          // 能当远程目标的条件:知道 SSH 连接(conn),或者是非 direct 且有 host 的条目
+          // —— 后者靠 ~/.ssh/config 的别名也能连,不一定非填 conn。
+          servers: servers.map((s) => ({
+            name: s.name,
+            label: s.label,
+            dshPort: s.dshPort,
+            hasConn: Boolean(s.conn ?? s.mirror),
+            remote: Boolean(s.conn ?? s.mirror) || (!s.direct && Boolean(s.host) && s.host !== "127.0.0.1"),
+          })),
+        });
+      } catch (e) {
+        send(400, { error: String(e?.message ?? e) });
+      }
+      return;
+    }
+    if (url.pathname === "/api/workbench" && req.method === "POST") {
+      let body;
+      try { body = await readBody(req); } catch (e) { return send(400, { error: String(e?.message ?? e) }); }
+      const servers = loadServers();
+      const source = servers.find((s) => s.name === body.source);
+      if (!source) return send(400, { error: `清单里没有机器 "${body.source}",先把那台服务器添加上` });
+      if (servers.some((s) => s.name === body.name)) return send(400, { error: `已有同名工作台 "${body.name}"` });
+      const used = servers.flatMap((s) => [s.dshPort, s.localPort]).filter(Boolean);
+      let created = null;
+      try {
+        created = await createWorkbench({
+          name: body.name,
+          label: body.label,
+          note: body.note,
+          remoteRoot: body.remoteRoot || "/root",
+          port: body.port ? Number(body.port) : undefined,
+          sourceServer: source.name,
+          conn: source.conn ?? source.mirror,
+        }, {
+          mainHome: DSH_HOME,
+          templateHome: DSH_HOME,
+          dshBin: findDshBin(),
+          usedPorts: used,
+        }, (msg) => console.log(`  [workbench] ${msg}`));
+      } catch (error) {
+        return send(500, { error: String(error?.message ?? error), steps: error?.steps ?? [] });
+      }
+
+      // 注册进清单 → 启动 → 等端口 → 再确认进程没有立刻死掉
+      // 注意 validateServer 是「返回 {error}」而不是抛错,不能靠 try/catch。
+      const checked = validateServer(created.serverRecord, { existingNames: servers.map((s) => s.name) });
+      if (checked.error) {
+        rollbackWorkbench(created.home);
+        return send(500, { error: `生成的条目未通过校验,已回滚: ${checked.error}`, steps: created.steps });
+      }
+      const record = checked.value;
+      saveServers([...servers, record]);
+      created.steps.push({ title: "注册进清单", ok: true, detail: `${record.name} → :${record.dshPort}` });
+
+      const started = await startDirect(record);
+      const ready = await waitForPort(record.dshPort);
+      await new Promise((r) => setTimeout(r, 2500)); // 端口开放 ≠ 启动成功:崩溃前端口也会短暂打开
+      const alive = isPidAlive(loadPids()[record.name]);
+      const stable = ready && alive && (await isPortOpen(record.dshPort));
+      const diagnosis = stable ? "" : bootLogTail(record.name);
+      created.steps.push({
+        title: "启动实例",
+        ok: stable,
+        detail: stable ? `:${record.dshPort} 就绪且进程存活` : `启动失败(${started.msg})${diagnosis ? " — 见下方诊断" : ""}`,
+      });
+      send(stable ? 200 : 500, {
+        steps: created.steps,
+        ok: stable,
+        error: stable ? undefined : "实例启动后未能稳定存活",
+        server: await serverStatus(record),
+        url: `http://127.0.0.1:${record.dshPort}`,
+        home: created.home,
+        mountRoot: created.mountRoot,
+        bootLog: bootLogPath(record.name),
+        diagnosis,
+      });
+      return;
+    }
+
+    // ── 远程文件浏览(SFTP 就地读写,不落本地副本) ─────────────────────────
+    if (url.pathname === "/api/rw/machines") {
+      send(200, { machines: machinesWithConn() });
+      return;
+    }
+    // 「我是谁」:按工作台端口反查它属于哪台机器 —— 每个分区工作台只服务自己那台
+    if (url.pathname === "/api/rw/whoami") {
+      const port = Number(url.searchParams.get("port") || 0);
+      const all = machinesWithConn();
+      let hit;
+      if (port) {
+        hit = loadServers().find((s) => Number(s.localPort ?? s.dshPort) === port || Number(s.dshPort) === port);
+      }
+      let machine = null;
+      if (hit) {
+        try {
+          const c = resolveConn(hit, {});
+          machine = {
+            name: hit.name, label: hit.label || hit.name,
+            host: c.host, port: c.port, user: c.user,
+            defaultPath: hit.conn?.defaultPath || "/root",
+          };
+        } catch { /* 无连接信息则视为未匹配 */ }
+      }
+      send(200, { port, machine, machines: all });
+      return;
+    }
+    if (url.pathname === "/api/rw/list") {
+      const name = url.searchParams.get("name");
+      const path = url.searchParams.get("path") || "/";
+      try {
+        const conn = await getFileConn(name);
+        const target = path;
+        const st = await conn.stat(target).catch(() => null);
+        if (st && !st.isDirectory()) return send(400, { error: `${target} 不是目录` });
+        const entries = await conn.readdir(target);
+        const list = entries.map((e) => ({
+          name: e.filename,
+          dir: Boolean(e.attrs.isDirectory?.()),
+          size: e.attrs.size ?? 0,
+          mtime: (e.attrs.mtime ?? 0) * 1000,
+        })).sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
+        send(200, { path: target, entries: list });
+      } catch (e) {
+        send(400, { error: `读取目录失败: ${e.message}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/rw/read") {
+      const name = url.searchParams.get("name");
+      const path = url.searchParams.get("path");
+      try {
+        const conn = await getFileConn(name);
+        const st = await conn.stat(path);
+        if (st.size > MAX_READ_BYTES) {
+          return send(200, { path, size: st.size, truncated: true, text: "" , note: `文件 ${st.size} 字节,超过 ${MAX_READ_BYTES} 字节上限,请用命令行 rw.mjs read --head/--tail` });
+        }
+        const buf = await conn.readFile(path);
+        const binary = buf.includes(0);
+        send(200, {
+          path, size: st.size, truncated: false,
+          binary,
+          text: binary ? "" : buf.toString("utf8"),
+          note: binary ? "二进制文件,不显示内容" : undefined,
+        });
+      } catch (e) {
+        send(400, { error: `读取文件失败: ${e.message}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/rw/write" && req.method === "POST") {
+      const body = await readBody(req);
+      try {
+        const conn = await getFileConn(body.name);
+        const existed = await conn.stat(body.path).then(() => true).catch(() => false);
+        await conn.writeFile(body.path, Buffer.from(String(body.text ?? "")));
+        send(200, { ok: true, path: body.path, existed });
+      } catch (e) {
+        send(400, { error: `保存失败: ${e.message}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/rw/mkdir" && req.method === "POST") {
+      const body = await readBody(req);
+      try {
+        const conn = await getFileConn(body.name);
+        await conn.mkdirp(body.path);
+        send(200, { ok: true, path: body.path });
+      } catch (e) {
+        send(400, { error: `建目录失败: ${e.message}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/rw/rm" && req.method === "POST") {
+      const body = await readBody(req);
+      try {
+        const conn = await getFileConn(body.name);
+        const st = await conn.stat(body.path).catch(() => null);
+        if (!st) return send(404, { error: "路径不存在" });
+        if (st.isDirectory()) {
+          if (!body.recursive) return send(400, { error: "目录需要勾选递归删除" });
+          const r = await conn.exec(`rm -rf '${String(body.path).replace(/'/g, "'\\''")}'`);
+          if (r.code !== 0) return send(400, { error: r.stderr || "删除失败" });
+        } else {
+          await conn.unlink(body.path);
+        }
+        send(200, { ok: true, path: body.path });
+      } catch (e) {
+        send(400, { error: `删除失败: ${e.message}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/rw/mv" && req.method === "POST") {
+      const body = await readBody(req);
+      try {
+        const conn = await getFileConn(body.name);
+        await conn.rename(body.from, body.to);
+        send(200, { ok: true });
+      } catch (e) {
+        send(400, { error: `重命名失败: ${e.message}` });
       }
       return;
     }

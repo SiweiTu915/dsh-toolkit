@@ -1,0 +1,41 @@
+# dsh-bash-sftp 的 bundle 层:换掉默认 bash 执行器,并让权限预置表认得它。
+#
+# 1. 换掉 bash-sandbox:它的沙箱是**本机**语义(confine 本机进程),在远程世界里
+#    既无意义,还会把命令包成本机的 sandbox-exec(远程没有该程序)。换成
+#    dsh-bash-sftp —— 执行仍由远程 subprocess 承担,它只如实汇报 sandboxMode。
+#
+# 2. 补一条 permission 预置:permission-presets 的推导是
+#      (ctx.shell.sandboxMode, ctx.approval.policy) → 表里找匹配项
+#    远程 bash 汇报 danger-full-access,而 approval 是 ask,基线表里没有
+#    (danger-full-access, ask) 这一对,推导会落到保留值 "custom" 并直接抛错。
+#    所以这里显式补上这一条(其余三条照抄基线,避免预置表被整体替换后丢失)。
+- id: bash-sandbox
+  disabled: true
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: 'read-only'
+        description: '只读:不允许任何写入。'
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 'workspace-write'
+        description: '可写工作区;更宽的操作需要批准。'
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: 'danger-full-access'
+        description: '完全文件访问,不询问批准。'
+      remote-unconfined:
+        sandbox: danger-full-access
+        approval: ask
+        name: '远程(无本地沙箱)'
+        description: '命令在远程机器上以 root 身份运行,本机不施加文件沙箱;风险操作仍会请求批准。'
+
+- insert:
+    - id: bash-sftp
+      name: 'dsh-bash-sftp'

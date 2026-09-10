@@ -1,0 +1,5 @@
+# dsh-remote-ui 的 bundle 层:新增一个客户端插件条目
+# 注意:新增条目要用 insert;直接写 `- id: xxx` 是"修改已存在条目",不存在就只报警告。
+- insert:
+    - id: dsh-remote-ui
+      name: 'dsh-remote-ui'

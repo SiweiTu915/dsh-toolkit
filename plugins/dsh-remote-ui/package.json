@@ -1,0 +1,19 @@
+{
+  "name": "dsh-remote-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把远程文件浏览器做进 dsh 工作台(客户端插件)",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./client": { "default": "./lib/client.js" },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"],
+      "platform": "web"
+    }
+  }
+}
