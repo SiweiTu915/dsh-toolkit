@@ -34,25 +34,32 @@
 
 ## 保持"本机使用"与"仓库版本"同步
 
-两种方式,选一种并坚持:
+**原则:本机是持续使用的生产环境,仓库只是发布副本 —— 两者解耦,不做软链。**
+(软链会让你的日常工具依赖仓库目录是否存在/是否被移动,风险不值得;私人配置也不该落进公开仓库目录。)
 
-**A. 单一数据源(推荐,避免漂移)**:让 `~/.dsh` 里的文件用**软链**指向仓库,改任意一处都是同一个文件。
-```sh
-ln -sfn ~/.dsh/publish/dsh-toolkit/tools/update-dsh.mjs   ~/.dsh/update-dsh.mjs
-ln -sfn ~/.dsh/publish/dsh-toolkit/tools/migrate-dsh.mjs  ~/.dsh/migrate-dsh.mjs
-ln -sfn ~/.dsh/publish/dsh-toolkit/dsh-remote             ~/.dsh/dsh-remote
-ln -sfn ~/.dsh/publish/dsh-toolkit/plugins/dsh-plugin-amend ~/.dsh/plugins/dsh-plugin-amend
-ln -sfn ~/.dsh/publish/dsh-toolkit/skills/gpu-partition    ~/.dsh/skills/gpu-partition
-```
-个人配置(如 `dsh-remote/servers.json`)会跟着落在仓库目录里,但已被 `.gitignore` 排除,**不会提交**。
+用同步脚本衔接,一条命令完成拷贝 + 脱敏扫描:
 
-**B. 手动同步(简单,但要记得)**:改完 `~/.dsh` 的原件后,拷贝到仓库再提交:
 ```sh
-cp ~/.dsh/update-dsh.mjs  ~/.dsh/publish/dsh-toolkit/tools/
-cp ~/.dsh/migrate-dsh.mjs ~/.dsh/publish/dsh-toolkit/tools/
-# dsh-remote / plugins / skills 同理
-cd ~/.dsh/publish/dsh-toolkit && git add -A && git commit -m "sync: ..." && git push
+bash tools/sync-to-repo.sh          # 默认从 ~/.dsh 同步
+bash tools/sync-to-repo.sh /path/to/DSH_HOME
+EXTRA_SCAN="你的服务器域名|你的邮箱" bash tools/sync-to-repo.sh   # 追加你自己的敏感串
 ```
+
+脚本做三件事:
+
+1. 拷贝**通用**文件(工具、远程面板、插件)到仓库
+2. **敏感串扫描**:命中就中止并列出位置(防止手误把私人信息提交进公开历史)
+3. 展示 `git status`,由你确认后手动 commit/push
+
+**脚本刻意不自动同步的文件**(仓库里是脱敏公开版,本机是个人版):
+
+| 文件 | 原因 |
+|---|---|
+| `skills/gpu-partition/SKILL.md` | 本机版含你的服务器地址与项目名 → 仓库版是模板 |
+| `docs/USAGE.md` | 本机版含你的个人技能清单 |
+| `dsh-remote/servers.json`、`.state/`、`sim-homes/` | 个人数据(已被 `.gitignore` 排除) |
+
+改这些文件时:**在本机改完使用,再手工把脱敏后的内容同步到仓库版**(两边内容会不同,这是有意的)。
 
 ## 版本更新后要做什么
 
