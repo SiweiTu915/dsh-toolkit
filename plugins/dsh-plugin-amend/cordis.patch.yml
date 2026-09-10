@@ -1,3 +1,4 @@
-# dsh-plugin-amend 的 bundle 层：把代码插件入口挂进 profile
-- id: history-amend
-  name: dsh-plugin-amend
+# dsh-plugin-amend 的 bundle 层:新增插件条目(新增必须用 insert)
+- insert:
+    - id: history-amend
+      name: 'dsh-plugin-amend'

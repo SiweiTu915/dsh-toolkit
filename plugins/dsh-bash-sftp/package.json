@@ -1,0 +1,15 @@
+{
+  "name": "dsh-bash-sftp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "远程挂载下的 bash 执行器:如实汇报 sandboxMode,默认 workdir 指向挂载点",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

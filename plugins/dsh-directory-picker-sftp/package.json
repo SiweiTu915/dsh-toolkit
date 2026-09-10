@@ -1,0 +1,15 @@
+{
+  "name": "dsh-directory-picker-sftp",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "远程目录选择器:让 dsh 的 Add workspace 直接浏览远程目录树,选中即用(本机自动物化空占位)",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

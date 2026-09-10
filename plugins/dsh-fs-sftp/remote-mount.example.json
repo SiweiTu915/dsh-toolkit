@@ -1,0 +1,15 @@
+{
+  "remoteDir": "/path/to/.dsh/dsh-remote",
+  "server": "your-server",
+  "remoteRoot": "/root",
+  "localRoot": "/path/to/.dsh/remote-workspaces/your-server",
+
+  "sshTarget": "your-server",
+  "outsideMount": "refuse",
+  "remoteRg": "/usr/bin/rg",
+  "provision": true,
+  "readOnly": false,
+  "maxTextBytes": 67108864,
+  "controlPersist": 120,
+  "connectTimeoutSec": 20
+}

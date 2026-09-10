@@ -20,3 +20,6 @@ harness/
 dsh-remote/servers.json
 dsh-remote/.state/
 dsh-remote/sim-homes/
+
+# 本地镜像目录(含远程代码,绝不提交)
+dsh-remote/mirrors/

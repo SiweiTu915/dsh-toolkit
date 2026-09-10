@@ -1,0 +1,22 @@
+# dsh-directory-picker-sftp 的 bundle 层:把目录选择器换成远程版。
+#
+# ⚠️ 这里必须挂「一对」,不是只挂宿主后端。
+# dsh 的默认行是 `@deepseek-ai/dsh-host-directory-picker-auto`,它在启动时按
+# 主机情况解析出 native / browse,然后把**两个面**都作为真实 Loader 条目挂上:
+#     BACKEND_PACKAGES[kind]  → 宿主后端(提供 ctx.directoryPicker 能力)
+#     SURFACE_PACKAGES[kind]  → 客户端界面(占 ui-workspace 的 directory-flow 空位)
+# 官方注释原话:「pinning an interaction remains composing that pair directly
+# instead of this row」。所以只禁用 -auto 而只插宿主后端的话,客户端界面不会
+# 被挂载 —— 表现就是「Add workspace 按钮消失」。下面那一行就是补回界面这一面。
+- id: directory-picker
+  disabled: true
+
+- insert:
+    # 宿主面:远程目录树(浏览时把每个目录在本机物化成空占位,选中即可用)
+    - id: directory-picker-sftp
+      name: 'dsh-directory-picker-sftp'
+
+    # 界面面:官方 browse 客户端界面,自动渲染上面 list 的结果
+    # 它是 dual-face 包,宿主半边是空壳,挂载安全。
+    - id: directory-picker-browse-surface
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'

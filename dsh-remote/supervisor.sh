@@ -23,7 +23,9 @@ if [ -z "$NODE_BIN" ]; then
   log "✗ 找不到 node,退出(等 launchd 重启)"
   exit 1
 fi
-export PATH="$(dirname "$NODE_BIN"):/usr/local/bin:/opt/homebrew/bin:$PATH"
+# launchd 环境 PATH 很精简:补上 node 目录 + $HOME/.dsh/bin(corepack 装的 pnpm 和 dsh shim 在那里,
+# 否则面板里调 `dsh plugin` 会报 pnpm not found)
+export PATH="$(dirname "$NODE_BIN"):$HOME/.dsh/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 log "supervisor 启动 (DIR=$DIR, NODE=$NODE_BIN)"
 

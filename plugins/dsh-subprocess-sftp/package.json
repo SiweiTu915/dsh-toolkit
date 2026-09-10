@@ -1,0 +1,15 @@
+{
+  "name": "dsh-subprocess-sftp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SSH-backed ctx.subprocess provider:让 DSH 会话的 bash / glob / grep 直接在远程机器上执行",
+  "main": "lib/index.js",
+  "exports": {
+    ".": { "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}
