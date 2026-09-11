@@ -4,11 +4,18 @@
 #    既无意义,还会把命令包成本机的 sandbox-exec(远程没有该程序)。换成
 #    dsh-bash-sftp —— 执行仍由远程 subprocess 承担,它只如实汇报 sandboxMode。
 #
-# 2. 补一条 permission 预置:permission-presets 的推导是
+# 2. 补 permission 预置表:permission-presets 的推导是
 #      (ctx.shell.sandboxMode, ctx.approval.policy) → 表里找匹配项
-#    远程 bash 汇报 danger-full-access,而 approval 是 ask,基线表里没有
-#    (danger-full-access, ask) 这一对,推导会落到保留值 "custom" 并直接抛错。
-#    所以这里显式补上这一条(其余三条照抄基线,避免预置表被整体替换后丢失)。
+#    远程 bash 如实汇报 danger-full-access(远程命令确实不受本机约束),而 approval
+#    是 ask,基线表里没有 (danger-full-access, ask) 这一对,推导会落到保留值
+#    "custom" 并直接抛错 —— 所以必须显式补上这一条,否则整个组合启动失败。
+#
+#    ⚠️ 三档在远程世界的**实际含义**要说清(描述里也写了):
+#      · read-only / workspace-write 由 **dsh-fs-sftp 的 per-call 围栏**执行,
+#        即只约束文件工具(read / write / edit);
+#      · shell 命令不经过 fs 接缝,远程命令本身不受这三档约束 —— 它由审批策略兜底。
+#    之所以不把 shell 也纳入,是因为那需要在远程机上真的搭一层沙箱(bwrap 之类),
+#    没搭就往上报 workspace-write 等于撒谎。
 - id: bash-sandbox
   disabled: true
 
@@ -18,23 +25,23 @@
       read-only:
         sandbox: read-only
         approval: ask
-        name: 'read-only'
-        description: '只读:不允许任何写入。'
+        name: '只读(文件工具)'
+        description: '文件工具拒绝一切写入;shell 命令不受本机约束,风险操作仍会请求批准。'
       workspace-write:
         sandbox: workspace-write
         approval: ask
-        name: 'workspace-write'
-        description: '可写工作区;更宽的操作需要批准。'
+        name: '工作区可写(文件工具)'
+        description: '文件工具只能写在当前工作区之内;shell 命令不受本机约束,风险操作仍会请求批准。'
       danger-full-access:
         sandbox: danger-full-access
         approval: never
-        name: 'danger-full-access'
-        description: '完全文件访问,不询问批准。'
+        name: '完全放开'
+        description: '文件工具不受限,且不询问批准。'
       remote-unconfined:
         sandbox: danger-full-access
         approval: ask
-        name: '远程(无本地沙箱)'
-        description: '命令在远程机器上以 root 身份运行,本机不施加文件沙箱;风险操作仍会请求批准。'
+        name: '远程(默认:文件工具也放开)'
+        description: '默认档。命令在远程机上以 root 运行、文件工具不施加围栏;风险操作仍会请求批准。'
 
 - insert:
     - id: bash-sftp

@@ -182,8 +182,9 @@ export default class SftpDirectoryPicker extends DirectoryPicker {
   async withTransport(op) {
     let lastError
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const transport = await this.sftp()
+      // 建连同样要包进 try:否则连接失败会绕过这里的分类与重连,直接抛原始 net 错误
       try {
+        const transport = await this.sftp()
         return await op(transport)
       } catch (error) {
         lastError = error
