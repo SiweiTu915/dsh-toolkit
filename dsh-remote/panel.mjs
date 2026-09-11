@@ -565,6 +565,7 @@ const server = createServer(async (req, res) => {
           remoteRoot: body.remoteRoot || "/root",
           port: body.port ? Number(body.port) : undefined,
           sourceServer: source.name,
+          sourceEntry: source,
           conn: source.conn ?? source.mirror,
         }, {
           mainHome: DSH_HOME,
