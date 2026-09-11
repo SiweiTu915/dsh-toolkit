@@ -87,6 +87,8 @@
   .fm-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .fm-row:hover { background: #f3f4f6; }
   .fm-row.sel { background: #dbeafe; }
+  .fm-row .caret { width: 12px; color: #9ca3af; font-size: 10px; text-align: center; }
+  .fm-kids { }
   .fm-row .ico { width: 18px; text-align: center; }
   .fm-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fm-row .mt { color: #9ca3af; font-size: 11px; white-space: nowrap; }
@@ -429,7 +431,7 @@ function openConfig() {
 }
 
 /* ── 文件管理器:一棵树,增删改查 + 拖拽上传 + 下载 + 按类型分派的查看/编辑 ── */
-const FM = { machine: null, path: "/", entries: [], sel: null, original: "", current: null };
+const FM = { machine: null, path: "/", sel: null, original: "", current: null, open: new Set(), kids: new Map() };
 const FM_IMG = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
 const FM_NB = /\.ipynb$/i;
 const FM_JSON = /\.(json|jsonl|geojson)$/i;
@@ -438,6 +440,7 @@ const FM_CSV = /\.(csv|tsv)$/i;
 
 function fmOpen(machine) {
   FM.machine = machine; FM.path = "/"; FM.sel = null; FM.original = ""; FM.current = null;
+  FM.open = new Set(["/"]); FM.kids = new Map();
   document.getElementById("fmTitle").textContent = `文件 · ${machine}`;
   document.getElementById("fm").classList.add("open");
   document.getElementById("fmPane").innerHTML = '<div class="fm-empty">← 选一个文件查看/编辑,或把文件拖到左边上传</div>';
@@ -469,69 +472,109 @@ function fmtTime(ms) {
 function fmCrumbs() {
   const parts = FM.path.split("/").filter(Boolean);
   const el = document.getElementById("fmCrumbs");
-  el.innerHTML = `<a onclick="fmGo('/')">/</a>`;
+  el.innerHTML = `<a onclick="fmSelect('/')">/</a>`;
   let acc = "";
   for (const p of parts) {
     acc += `/${p}`;
     const target = acc;
-    el.innerHTML += `<span>›</span><a onclick="fmGo('${esc(target)}')">${esc(p)}</a>`;
+    el.innerHTML += `<span>›</span><a onclick="fmSelect('${esc(target)}')">${esc(p)}</a>`;
   }
 }
-function fmGo(path) {
-  if (FM.original && !confirm("有未保存的修改,确定切换目录?")) return;
-  FM.original = ""; FM.path = path; FM.sel = null;
-  fmList();
+/** 选中一个目录:决定新建/上传落在哪,并确保它在树里展开。 */
+function fmSelect(path) {
+  FM.path = path;
+  FM.open.add(path);
+  fmCrumbs();
+  ensureKids(path).then(fmRenderTree, (e) => fmStatus(`读取失败: ${e.message}`, "fm-err"));
 }
-async function fmList() {
-  const list = document.getElementById("fmList");
-  list.innerHTML = '<div class="fm-empty">读取中…</div>';
-  try {
-    const r = await api(`/api/rw/list?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(FM.path)}`);
-    FM.entries = r.entries || [];
-    FM.path = r.path || FM.path;
-    fmCrumbs();
-    list.innerHTML = "";
-    if (!FM.entries.length) list.innerHTML = '<div class="fm-empty">空目录 —— 把文件拖进来即可上传</div>';
-    for (const e of FM.entries) list.appendChild(fmRow(e));
-    fmStatus(`${FM.path} · ${FM.entries.length} 项`);
-  } catch (e) {
-    list.innerHTML = `<div class="fm-empty fm-err">${esc(e.message)}</div>`;
-  }
+async function ensureKids(path) {
+  if (FM.kids.has(path)) return FM.kids.get(path);
+  const r = await api(`/api/rw/list?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(path)}`);
+  const entries = r.entries || [];
+  FM.kids.set(path, entries);
+  return entries;
 }
-function fmRow(e) {
+async function fmToggle(path) {
+  if (FM.open.has(path)) { FM.open.delete(path); fmRenderTree(); return }
+  FM.open.add(path);
+  FM.path = path; fmCrumbs();
+  try { await ensureKids(path); fmRenderTree() } catch (e) { fmStatus(`读取失败: ${e.message}`, "fm-err") }
+}
+/** 重建整棵树(保留展开状态;子目录按需懒加载)。 */
+function fmRenderTree() {
+  const el = document.getElementById("fmList");
+  el.innerHTML = "";
+  if (!FM.kids.has("/")) { el.innerHTML = '<div class="fm-empty">读取中…</div>'; return }
+  el.appendChild(fmNode({ name: "/", dir: true, size: 0, mtime: 0 }, "", 0, true));
+  const n = FM.kids.get(FM.path);
+  fmStatus(`${FM.path}${n ? ` · ${n.length} 项` : ""}`);
+}
+const FM_CAP = 500; // 单个目录最多渲染多少个子项(避免超大目录把页面拖垮)
+function fmNode(entry, parentPath, depth, isRoot = false) {
+  const path = isRoot ? "/" : fmJoin(parentPath, entry.name);
+  const wrap = document.createElement("div");
+  wrap.className = "fm-node";
   const row = document.createElement("div");
-  row.className = "fm-row";
-  row.dataset.name = e.name;
-  row.draggable = !e.dir;
-  row.innerHTML = `<span class="ico">${e.dir ? "📁" : FM_IMG.test(e.name) ? "🖼" : FM_NB.test(e.name) ? "📓" : "📄"}</span>`
-    + `<span class="nm">${esc(e.name)}</span>`
-    + `<span class="mt">${e.dir ? "" : fmtSize(e.size)} ${fmtTime(e.mtime)}</span>`
+  row.className = `fm-row${FM.path === path ? " sel" : ""}`;
+  row.style.paddingLeft = `${6 + depth * 14}px`;
+  row.dataset.path = path;
+  row.draggable = !entry.dir;
+  const opened = entry.dir && FM.open.has(path);
+  const caret = entry.dir ? `<span class="caret">${opened ? "▾" : "▸"}</span>` : `<span class="caret"></span>`;
+  const ico = entry.dir ? "📁" : FM_IMG.test(entry.name) ? "🖼" : FM_NB.test(entry.name) ? "📓" : "📄";
+  row.innerHTML = caret + `<span class="ico">${ico}</span>`
+    + `<span class="nm">${esc(isRoot ? "/" : entry.name)}</span>`
+    + `<span class="mt">${entry.dir ? "" : `${fmtSize(entry.size)} ${fmtTime(entry.mtime)}`}</span>`
     + `<span class="acts">`
-    + (e.dir ? "" : `<button onclick="event.stopPropagation();fmDownload('${esc(e.name)}')" title="下载">⬇</button>`)
-    + `<button onclick="event.stopPropagation();fmRename('${esc(e.name)}')" title="重命名">✏️</button>`
-    + `<button onclick="event.stopPropagation();fmDelete('${esc(e.name)}',${e.dir})" title="删除">🗑</button>`
+    + (entry.dir ? "" : `<button onclick="event.stopPropagation();fmDownload('${esc(path)}')" title="下载">⬇</button>`)
+    + `<button onclick="event.stopPropagation();fmRename('${esc(path)}')" title="重命名">✏️</button>`
+    + `<button onclick="event.stopPropagation();fmDelete('${esc(path)}',${entry.dir})" title="删除">🗑</button>`
     + `</span>`;
-  row.onclick = () => (e.dir ? fmGo(fmJoin(FM.path, e.name)) : fmOpenFile(e.name));
-  if (e.dir) {
+  row.onclick = () => (entry.dir ? fmToggle(path) : fmOpenFileAt(path, entry.name));
+  if (entry.dir) {
     row.ondragover = (ev) => { ev.preventDefault(); row.classList.add("sel") };
-    row.ondragleave = () => row.classList.remove("sel");
+    row.ondragleave = () => { if (FM.path !== path) row.classList.remove("sel") };
     row.ondrop = async (ev) => {
-      ev.preventDefault(); ev.stopPropagation(); row.classList.remove("sel");
+      ev.preventDefault(); ev.stopPropagation();
+      if (FM.path !== path) row.classList.remove("sel");
       const files = ev.dataTransfer.files;
-      if (files && files.length) return fmUploadTo(fmJoin(FM.path, e.name), files);
+      if (files && files.length) { FM.open.add(path); await fmUploadTo(path, files); return }
       const from = ev.dataTransfer.getData("text/fm-move");
-      if (from) return fmMove(from, fmJoin(FM.path, e.name));
+      if (from) return fmMove(from, path);
     };
   } else {
-    row.ondragstart = (ev) => ev.dataTransfer.setData("text/fm-move", fmJoin(FM.path, e.name));
+    row.ondragstart = (ev) => ev.dataTransfer.setData("text/fm-move", path);
   }
-  return row;
+  wrap.appendChild(row);
+  if (opened) {
+    const box = document.createElement("div");
+    box.className = "fm-kids";
+    const kids = FM.kids.get(path);
+    if (kids === undefined) box.innerHTML = '<div class="fm-empty" style="padding:6px 20px">读取中…</div>';
+    else if (!kids.length) box.innerHTML = '<div class="fm-empty" style="padding:6px 20px">空目录 —— 拖文件进来即可上传</div>';
+    else {
+      for (const k of kids.slice(0, FM_CAP)) box.appendChild(fmNode(k, path, depth + 1));
+      if (kids.length > FM_CAP) box.insertAdjacentHTML("beforeend", `<div class="fm-empty" style="padding:6px 20px">…还有 ${kids.length - FM_CAP} 项未显示</div>`);
+    }
+    wrap.appendChild(box);
+  }
+  return wrap;
 }
-async function fmOpenFile(name) {
+/** 首次进入:加载根目录并展开。 */
+async function fmList() {
+  try {
+    await ensureKids("/");
+    FM.open.add("/");
+    fmRenderTree();
+  } catch (e) {
+    document.getElementById("fmList").innerHTML = `<div class="fm-empty fm-err">${esc(e.message)}</div>`;
+  }
+}
+async function fmOpenFileAt(path, name) {
   if (FM.original && !confirm("有未保存的修改,确定打开别的文件?")) return;
-  FM.sel = name; FM.original = "";
-  for (const r of document.querySelectorAll(".fm-row")) r.classList.toggle("sel", r.dataset.name === name);
-  const path = fmJoin(FM.path, name);
+  FM.sel = path;
+  FM.path = fmParent(path);           // 选中所在目录:新建/上传落在这里
+  fmCrumbs(); fmRenderTree();
   FM.current = { name, path };
   try {
     if (FM_IMG.test(name)) return fmRenderImage(name, path);
@@ -542,6 +585,10 @@ async function fmOpenFile(name) {
   } catch (e) {
     fmStatus(`打开失败: ${e.message}`, "fm-err");
   }
+}
+/** 按名字(相对当前选中目录)打开 —— 新建文件后用。 */
+async function fmOpenFile(name) {
+  return fmOpenFileAt(fmJoin(FM.path, name), name);
 }
 function fmPaneHead(name, extra = "") {
   return `<div class="fm-pane-head"><b>${esc(name)}</b><span class="sp"></span>${extra}`
@@ -705,12 +752,12 @@ function fmRenderBinary(name, path, size) {
     + `<div class="fm-empty">二进制文件不在此预览,点右上角下载</div>`;
   FM.original = "";
 }
-function fmDownload(name) {
-  const path = name ? fmJoin(FM.path, name) : FM.current?.path;
+function fmDownload(nameOrPath) {
+  const path = nameOrPath ? (nameOrPath.includes("/") ? nameOrPath : fmJoin(FM.path, nameOrPath)) : FM.current?.path;
   if (!path) return;
   const a = document.createElement("a");
   a.href = `/api/rw/download?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(path)}`;
-  a.download = name || "";
+  a.download = path.split("/").pop() || "";
   document.body.appendChild(a); a.click(); a.remove();
   fmStatus(`⬇ 开始下载 ${path}`, "");
 }
@@ -728,12 +775,13 @@ async function fmUploadTo(dir, files) {
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
       fmStatus(`✓ 已上传 ${dest}(${fmtSize(j.bytes)})`, "");
+      FM.kids.delete(dir);
     } catch (e) {
       fmStatus(`✗ ${f.name} 上传失败: ${e.message}`, "fm-err");
       return;
     }
   }
-  fmList();
+  fmRefresh();
 }
 async function fmMove(from, toDir) {
   const to = fmJoin(toDir, from.split("/").pop());
@@ -742,7 +790,7 @@ async function fmMove(from, toDir) {
     await api("/api/rw/mv", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: FM.machine, from, to }) });
     fmStatus(`✓ 已移动到 ${to}`, "");
-    fmList();
+    FM.kids.delete(fmParent(from)); FM.kids.delete(toDir); fmRefresh();
   } catch (e) { fmStatus(`移动失败: ${e.message}`, "fm-err") }
 }
 async function fmNewFile() {
@@ -751,7 +799,7 @@ async function fmNewFile() {
   try {
     await api("/api/rw/write", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name), text: "" }) });
-    await fmList(); await fmOpenFile(name);
+    FM.kids.delete(FM.path); await fmRefresh(); await fmOpenFile(name);
   } catch (e) { fmStatus(`新建失败: ${e.message}`, "fm-err") }
 }
 async function fmNewDir() {
@@ -760,29 +808,29 @@ async function fmNewDir() {
   try {
     await api("/api/rw/mkdir", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name) }) });
-    fmList();
+    FM.kids.delete(FM.path); fmRefresh();
   } catch (e) { fmStatus(`新建失败: ${e.message}`, "fm-err") }
 }
-async function fmRename(name) {
+async function fmRename(nameOrPath) {
   const to = prompt(`重命名 ${name} →`, name);
   if (!to || to === name) return;
   try {
     await api("/api/rw/mv", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: FM.machine, from: fmJoin(FM.path, name), to: fmJoin(FM.path, to) }) });
+      body: JSON.stringify({ name: FM.machine, from: full, to: fmJoin(fmParent(full), to) }) });
     fmStatus(`✓ 已重命名为 ${to}`, ""); fmList();
   } catch (e) { fmStatus(`重命名失败: ${e.message}`, "fm-err") }
 }
-async function fmDelete(name, dir) {
+async function fmDelete(nameOrPath, dir) {
   if (!confirm(`删除 ${name}${dir ? "(目录,递归)" : ""}?`)) return;
   try {
     await api("/api/rw/rm", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name), recursive: dir }) });
+      body: JSON.stringify({ name: FM.machine, path: full, recursive: dir }) });
     fmStatus(`✓ 已删除 ${name}`, "");
-    if (FM.current && FM.current.name === name) { FM.original = ""; FM.current = null; document.getElementById("fmPane").innerHTML = '<div class="fm-empty">已删除</div>' }
+    if (FM.current && FM.current.path === full) { FM.original = ""; FM.current = null; document.getElementById("fmPane").innerHTML = '<div class="fm-empty">已删除</div>' }
     fmList();
   } catch (e) { fmStatus(`删除失败: ${e.message}`, "fm-err") }
 }
-function fmRefresh() { fmStatus(""); fmList() }
+function fmRefresh() { FM.kids = new Map(); fmStatus(""); fmList() }
 
 // 拖拽上传:整个列表面板都是投放区(拖到目录行上则传进那个目录)
 (function fmBindDrop() {
