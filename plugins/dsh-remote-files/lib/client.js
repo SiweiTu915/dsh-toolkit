@@ -105,7 +105,7 @@ window.__ModuleLoader__.load({
 		const isJson = (n) => /\.(json|geojson)$/i.test(n);
 		const isMd = (n) => /\.(md|markdown)$/i.test(n);
 		const isCsv = (n) => /\.(csv|tsv)$/i.test(n);
-		const dlUrl = (machine, path) => `${panelBase()}/api/rw/download?${qs({ name: machine, path })}`;
+		const dlUrl = (m, path) => `${panelBase()}/api/rw/download?${qs({ name: m, path })}`;
 
 		function mdToHtml(src) {
 			let s = String(src).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -125,7 +125,8 @@ window.__ModuleLoader__.load({
 		function Icon({ children }) { return h("span", { className: "ico" }, children) }
 
 		function Pane() {
-			const [machine, setMachine] = react.useState(null);
+			const [machine, setMachine] = react.useState(null);   // whoami 返回的是对象 {name,label,host,port,user,defaultPath}
+			const mname = machine ? machine.name : null;
 			const [err, setErr] = react.useState("");
 			const [msg, setMsg] = react.useState("");
 			const [kids, setKids] = react.useState({});     // path → entries[]
@@ -142,12 +143,19 @@ window.__ModuleLoader__.load({
 			react.useEffect(() => {
 				let alive = true;
 				api(`/api/rw/whoami?port=${Number(location.port || 80)}`)
-					.then((r) => { if (alive && r.machine) { setMachine(r.machine); return load("/", r.machine) } if (alive) setErr("这个端口没有对应的机器(先在 dsh-remote 面板里登记)") })
+					.then((r) => {
+						if (!alive) return;
+						if (!r.machine) { setErr("这个端口没有对应的机器(先在 dsh-remote 面板里登记)"); return }
+						setMachine(r.machine);
+						const start = r.machine.defaultPath || "/";
+						setDir(start);
+						return load(start, r.machine.name);
+					})
 					.catch((e) => alive && setErr(`连不上面板 ${panelBase()}:${e.message}`));
 				return () => { alive = false };
 			}, []);
 
-			async function load(path, m = machine) {
+			async function load(path, m = mname) {
 				if (!m) return [];
 				const j = await api(`/api/rw/list?${qs({ name: m, path })}`);
 				const entries = j.entries || [];
@@ -167,7 +175,7 @@ window.__ModuleLoader__.load({
 				setSel(path); setDir(parent(path)); setPrev(false); setBusy(true);
 				try {
 					if (isImg(name)) { setFile({ name, path, kind: "image" }); return }
-					const j = await api(`/api/rw/read?${qs({ name: machine, path })}`);
+					const j = await api(`/api/rw/read?${qs({ name: mname, path })}`);
 					if (j.binary) { setFile({ name, path, kind: "binary", size: j.size }); return }
 					setFile({ name, path, kind: "text", text: j.text, original: j.text, size: j.size });
 				} catch (e) { setErr(e.message) } finally { setBusy(false) }
@@ -176,7 +184,7 @@ window.__ModuleLoader__.load({
 				if (!file || file.kind !== "text") return;
 				setBusy(true);
 				try {
-					await post("/api/rw/write", { name: machine, path: file.path, text: file.text });
+					await post("/api/rw/write", { name: mname, path: file.path, text: file.text });
 					setFile({ ...file, original: file.text });
 					toast(`✓ 已保存 ${file.path}`);
 					load(parent(file.path));
@@ -190,7 +198,7 @@ window.__ModuleLoader__.load({
 					for (const f of list) {
 						const dest = join(targetDir, f.name);
 						toast(`⬆ 上传 ${f.name}(${fmtSize(f.size)})…`);
-						const r = await fetch(`${panelBase()}/api/rw/upload?${qs({ name: machine, path: dest })}`, { method: "POST", body: f });
+						const r = await fetch(`${panelBase()}/api/rw/upload?${qs({ name: mname, path: dest })}`, { method: "POST", body: f });
 						const j = await r.json().catch(() => ({}));
 						if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
 						toast(`✓ 已上传 ${dest}(${fmtSize(j.bytes)})`);
@@ -200,7 +208,7 @@ window.__ModuleLoader__.load({
 			}
 			function download(path) {
 				const a = document.createElement("a");
-				a.href = dlUrl(machine, path);
+				a.href = dlUrl(mname, path);
 				a.download = path.split("/").pop() || "";
 				document.body.appendChild(a); a.click(); a.remove();
 				toast(`⬇ 开始下载 ${path}`);
@@ -208,26 +216,26 @@ window.__ModuleLoader__.load({
 			async function newFile() {
 				const name = prompt(`在 ${dir} 下新建文件名`);
 				if (!name) return;
-				try { await post("/api/rw/write", { name: machine, path: join(dir, name), text: "" }); await load(dir); openFile(join(dir, name), name) }
+				try { await post("/api/rw/write", { name: mname, path: join(dir, name), text: "" }); await load(dir); openFile(join(dir, name), name) }
 				catch (e) { setErr(e.message) }
 			}
 			async function newDir() {
 				const name = prompt(`在 ${dir} 下新建文件夹名`);
 				if (!name) return;
-				try { await post("/api/rw/mkdir", { name: machine, path: join(dir, name) }); await load(dir); setOpen((o) => ({ ...o, [dir]: true })) }
+				try { await post("/api/rw/mkdir", { name: mname, path: join(dir, name) }); await load(dir); setOpen((o) => ({ ...o, [dir]: true })) }
 				catch (e) { setErr(e.message) }
 			}
 			async function rename(path) {
 				const name = path.split("/").pop();
 				const to = prompt(`重命名 ${name} →`, name);
 				if (!to || to === name) return;
-				try { await post("/api/rw/mv", { name: machine, from: path, to: join(parent(path), to) }); delete kids[parent(path)]; await load(parent(path)) }
+				try { await post("/api/rw/mv", { name: mname, from: path, to: join(parent(path), to) }); delete kids[parent(path)]; await load(parent(path)) }
 				catch (e) { setErr(e.message) }
 			}
 			async function del(path, isDir) {
 				if (!confirm(`删除 ${path}${isDir ? "(目录,递归)" : ""}?`)) return;
 				try {
-					await post("/api/rw/rm", { name: machine, path, recursive: isDir });
+					await post("/api/rw/rm", { name: mname, path, recursive: isDir });
 					if (sel === path) { setSel(null); setFile(null) }
 					delete kids[parent(path)]; await load(parent(path));
 				} catch (e) { setErr(e.message) }
@@ -255,7 +263,7 @@ window.__ModuleLoader__.load({
 						const files = e.dataTransfer.files;
 						if (files && files.length) { setOpen((o) => ({ ...o, [path]: true })); return uploadTo(path, files) }
 						const from = e.dataTransfer.getData("text/drf-move");
-						if (from && parent(from) !== path) { try { await post("/api/rw/mv", { name: machine, from, to: join(path, from.split("/").pop()) }); delete kids[parent(from)]; delete kids[path]; await load(path) } catch (er) { setErr(er.message) } }
+						if (from && parent(from) !== path) { try { await post("/api/rw/mv", { name: mname, from, to: join(path, from.split("/").pop()) }); delete kids[parent(from)]; delete kids[path]; await load(path) } catch (er) { setErr(er.message) } }
 					} : undefined,
 				},
 					h("span", { className: "drf-caret" }, caret),
@@ -284,7 +292,7 @@ window.__ModuleLoader__.load({
 			/* ---- 渲染:编辑器 / 预览 ---- */
 			function editor() {
 				if (!file) return h("div", { className: "drf-empty" }, "← 点一个文件查看/编辑;拖文件进树里上传");
-				if (file.kind === "image") return h("div", { className: "drf-prev" }, h("img", { className: "drf-img", src: dlUrl(machine, file.path), alt: file.name }));
+				if (file.kind === "image") return h("div", { className: "drf-prev" }, h("img", { className: "drf-img", src: dlUrl(mname, file.path), alt: file.name }));
 				if (file.kind === "binary") return h("div", { className: "drf-empty" }, `二进制文件(${fmtSize(file.size)}),点右上角下载`);
 				const dirty = file.text !== file.original;
 				const head = h("div", { className: "drf-ehead" },
@@ -363,14 +371,14 @@ window.__ModuleLoader__.load({
 
 			return h("div", { className: "drf" },
 				h("div", { className: "drf-head" },
-					h("span", { className: "drf-title" }, `📁 ${machine || "远程文件"}`),
+					h("span", { className: "drf-title" }, `📁 ${machine ? (machine.label || machine.name) : "远程文件"}`),
 					h("span", { className: "drf-crumb" }, crumbs),
 				),
 				h("div", { className: "drf-bar" },
 					h("button", { className: "drf-btn", onClick: () => { setKids({}); load("/") } }, "🔄 刷新"),
-					h("button", { className: "drf-btn", disabled: !machine, onClick: newFile }, "📄 新建文件"),
-					h("button", { className: "drf-btn", disabled: !machine, onClick: newDir }, "📁 新建文件夹"),
-					h("button", { className: "drf-btn", "data-primary": true, disabled: !machine, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
+					h("button", { className: "drf-btn", disabled: !mname, onClick: newFile }, "📄 新建文件"),
+					h("button", { className: "drf-btn", disabled: !mname, onClick: newDir }, "📁 新建文件夹"),
+					h("button", { className: "drf-btn", "data-primary": true, disabled: !mname, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
 					h("input", { ref: upRef, type: "file", multiple: true, style: { display: "none" }, onChange: (e) => { uploadTo(dir, e.target.files); e.target.value = "" } }),
 				),
 				h("div", {
