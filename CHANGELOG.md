@@ -21,6 +21,8 @@
 | 2026-09-10 | `dsh-remote/panel.mjs` · `supervisor.sh` | 修复两处环境问题:①launchd 的 PATH 缺 `$HOME/.dsh/bin`,建工作台时报 `pnpm not found`;②direct 实例启动输出原为 `stdio:'ignore'`,实例崩溃无从排查,改为落 `.state/boot-<name>.log` | 补 PATH 后安装步骤通过;启动日志实测用于定位一次真实崩溃(端口开放 ≠ 启动成功,须确认进程存活) |
 | 2026-09-11 | `plugins/dsh-fs-sftp` | 补 `readByteRange(target, {offset,length}, signal)`:0.1.5 起 fs 契约由 12 个抽象方法增至 13 个,新增此方法供工作区文件树/文档预览做分页读。语义对齐官方 `readByteWindow`(先确认常规文件;`length===0` 返回空;窗口越界返回空**不报错**) | 用远程 `head -c` / `dd` 的 md5 独立比对 3/3(含一个被文件末尾截断的窗口);边界(长度 0、越界、恰好末尾)全对;错误码为 `FS_NOT_REGULAR_FILE`/`FS_IO_ERROR`;并在 0.1.5 契约下复验 |
 | 2026-09-11 | 全量 · 引擎升级 | 0.1.2-rc.1 → 0.1.5-rc.2。该版本新增右侧栏 + 工作区文件树 + 文档预览 + 外部打开(新增 8 个 Loader 行),`tool-str-replace-editor` 行消失。**上游侧栏文件树走 `ctx.fs`** —— 因此远程 fs provider 让它自动显示远程目录树,自研的 `dsh-remote-ui` 抽屉(走面板 HTTP API)随之退役 | 旧版 `--dump-config` 对比新增/消失行;测试分区实跑 canary:bash 返回远程 Linux 内核、glob/grep 与远程真值一致;**上游重写的 `LocalSubprocessRuntime.spawn`(新增 cgroup scope / Windows job 进程约束)未打断我们的 `spawn` 覆盖**;我们禁用的 5 个行 id 全部仍在(patch 不会静默失效);升级后 web 实例的客户端插件图确认 `ui-sidebar-files`/`ui-sidebar-right`/`workspace-files` 与自研 `directory-picker-browse` 同挂 |
+| 2026-09-11 | `plugins/dsh-fs-sftp` | **修复两个真 bug**(都由端到端实测暴露,均为「新建能过、覆盖必挂」类):①`writeAtomic` 用普通 `SSH_FXP_RENAME`,而 OpenSSH 按 SFTP v3 规范**拒绝覆盖已存在文件**(报 code 4 `Failure`)—— 导致 `editText` 与覆盖式 `writeText` 全程不可用;改为优先 `ext_openssh_rename`(posix-rename 扩展,真正的 `rename(2)`,原子且可覆盖),服务端不支持时退回「先删再改名」。②`editText` 的版本守卫读的是 `existing.version`,而 `probe()` 返回**原始 ssh2 Stats 对象**(没有该字段)→ `undefined !== expected.version` 恒真,**只要调用方带版本守卫就必报 `FS_STALE_VERSION`**;改用 `versionOf(existing)`(与 `writeText` 一致)。另:发布失败时清理暂存文件 | 直测:覆盖式写入 / 单处编辑 / 全量替换 / 版本守卫(新鲜成功 + 过期报错)全通过;端到端由 agent 用 `edit` 工具改远程文件,会话日志 `changed since` × 0、`isError` × 0,远程独立核对内容正确且无 `.dsh-tmp-*` 残留 |
+| 2026-09-11 | `dsh-remote/lib/sftp.mjs` | 同一根因的另一处:`rename` 也改为 posix-rename 优先(影响 `rw.mjs mv` 覆盖已存在文件) | `rw.mjs mv` 覆盖目标成功、源消失、目标内容正确 |
 
 ## 走不通的(留档以免重踩)
 
@@ -33,3 +35,6 @@
 | 2026-09-10 | 用 `curl` 直接抓 dsh web 实例页面做程序化验证 | token 是一次性的,且 `dsh web` 默认会自动打开浏览器把 token 消费掉;必须先 `--no-open` 起实例,再用 `?token=` 换 cookie(303 + `Set-Cookie`)带 cookie jar 跟进去才能拿到页面 |
 | 2026-09-11 | 在测试分区里用新引擎版本实测 | 踩雷:`$DSH_HOME/profiles/node_modules` 若是**指向另一个 home 的符号链接**,启动时会按「治愈到当前运行的安装」的逻辑**穿透改写对方** —— 等于拿新版本跑一次测试就污染了生产环境的模块解析。测试分区必须先把它换成独立目录(启动时自建) |
 | 2026-09-11 | 排查三个实例同时不可达 | 白查一场:服务是**用户自己在面板上「全部断开」关的**。事后看判据一直摆在眼前 —— 三个同时消失而 supervisor/panel 都活着、启动日志只有启动行没有堆栈(SIGTERM 而非崩溃)、`tunnels.json` 变成空表(正是 disconnect-all 的正常输出)。**看到空表应先问「谁主动关的」,再往故障方向查** |
+| 2026-09-11 | 我自己验证 fs provider 的方式 | 上面两个 bug 都躲过了初测,原因是**只测了「新建」和「不带守卫」**:写文件只测 create、编辑只测「不带 expected」与「故意过期」两种。而工具层实际走的是**覆盖写 + 新鲜版本守卫** —— 恰好是没测的两条。教训:provider 的写入路径必须成对测「新建 / 覆盖」,守卫必须成对测「新鲜(应成功)/ 过期(应报错)」 |
+| 2026-09-11 | 两轮 canary 排查同一文件 | 旧代码的进程没退就启动了新一轮,两个 agent 抢同一个远程文件,会话日志互相污染,一度让我误判「修复无效」。**在排查并发写同一目标的问题前,先确认没有残留进程**(`pgrep -fl`),否则结论不可信 |
+| 2026-09-11 | 读 0.1.5 的会话日志做取证 | 会话日志换成 `session.v3.jsonl.zstd`,且是**多帧 zstd**(每批 append 一个 frame):`zstdDecompressSync` 与 `createZstdDecompress` 都只解第一帧(实测 113KB 只解出 200B)。要按魔数 `28 b5 2f fd` 切分后逐帧解压,才能拿到完整的工具调用与结果 —— 这是排查「工具到底报了什么」最硬的证据 |

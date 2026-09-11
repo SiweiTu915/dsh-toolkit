@@ -523,20 +523,62 @@ export default class SftpFileSystem extends FileSystem {
       })
   }
 
-  /** 原子写:同目录 staging + rename(POSIX 同文件系统 rename 是原子的)。 */
+  /** 原子写:同目录 staging + posix-rename(POSIX 同文件系统 rename 是原子的)。 */
   async writeAtomic(remote, content, existing, signal) {
     const mode = existing ? Number(existing.mode) & 0o777 : undefined
     const staging = `${remote}.dsh-tmp-${randomBytes(6).toString('hex')}`
     await this.withTransport(async (transport) => {
-      await transport.mkdirp(posix.dirname(remote))
-      throwIfAborted(signal, 'write')
-      await transport.writeFile(staging, Buffer.from(content, 'utf8'))
-      if (mode !== undefined) {
-        try { await transport.chmod(staging, mode) } catch { /* 权限继承失败不阻断发布 */ }
+      try {
+        await transport.mkdirp(posix.dirname(remote))
+        throwIfAborted(signal, 'write')
+        await transport.writeFile(staging, Buffer.from(content, 'utf8'))
+        if (mode !== undefined) {
+          try { await transport.chmod(staging, mode) } catch { /* 权限继承失败不阻断发布 */ }
+        }
+        throwIfAborted(signal, 'write')
+        await this.publishStaging(transport, staging, remote, Boolean(existing))
+      } catch (error) {
+        // 发布失败要清掉暂存,否则远程会积一堆 .dsh-tmp-*(实测残留过)
+        await transport.unlink(staging).catch(() => { /* 可能已随 rename 消失 */ })
+        throw error
       }
-      throwIfAborted(signal, 'write')
-      await transport.rename(staging, remote)
     }, 'write', remote)
+  }
+
+  /**
+   * 把 staging 发布到目标路径。
+   *
+   * ⚠️ 不能直接用 `rename`:OpenSSH 按 SFTP v3 规范**拒绝**用 `SSH_FXP_RENAME`
+   * 覆盖已存在的文件(报 code 4 `Failure`),所以普通 rename 只能新建、一覆盖就
+   * 失败 —— 会让 `editText` 和覆盖式 `writeText` 全部报错。
+   *
+   * 正解是 posix-rename 扩展(`ext_openssh_rename`),它走真正的 `rename(2)`:
+   * 原子、且可以覆盖。服务端不支持该扩展时退回「先删再改名」—— 非原子,但至少能用。
+   * @param transport - 已就绪的连接。
+   * @param staging - 同目录的暂存文件。
+   * @param remote - 目标路径。
+   * @param existing - 目标是否已存在(决定失败后能否走删除退路)。
+   */
+  async publishStaging(transport, staging, remote, existing) {
+    const { sftp } = transport
+    if (typeof sftp.ext_openssh_rename === 'function') {
+      try {
+        await new Promise((resolve, reject) => {
+          sftp.ext_openssh_rename(staging, remote, (error) => (error ? reject(error) : resolve()))
+        })
+        return
+      } catch (error) {
+        // 服务端不支持扩展,或者该文件系统不允许原子覆盖 —— 落到下面
+        if (!existing) throw error
+      }
+    }
+    try {
+      await transport.rename(staging, remote)
+    } catch (error) {
+      if (!existing) throw error
+      await transport.unlink(remote).catch(() => { /* 已经不在了 */ })
+      await transport.rename(staging, remote)
+    }
   }
 
   async readForDiff(remote, displayPath, signal) {
@@ -605,7 +647,11 @@ export default class SftpFileSystem extends FileSystem {
       const existing = await this.probe(target.targetKey, { follow: true })
       if (!existing) throw new FsError(`cannot edit "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
       if (!existing.isFile()) throw new FsError(`cannot edit "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
-      if (expected && existing.version !== expected.version) {
+      // ⚠️ 必须用 versionOf(existing) 算版本:`probe` 返回的是原始 ssh2 Stats 对象,
+      // 上面没有 `version` 字段。直接读 existing.version 会得到 undefined,
+      // 使这个守卫恒真 —— 只要调用方带了版本守卫,任何编辑都会误报
+      // FS_STALE_VERSION("file changed since it was read")。
+      if (expected?.version !== undefined && versionOf(existing) !== expected.version) {
         throw new FsError(`cannot edit "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
       }
       const original = await this.readText(target, signal)
