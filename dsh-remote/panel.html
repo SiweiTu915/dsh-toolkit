@@ -430,22 +430,44 @@ function openConfig() {
   }).catch(() => toast("无法打开配置文件"));
 }
 
-/* ── 文件管理器:一棵树,增删改查 + 拖拽上传 + 下载 + 按类型分派的查看/编辑 ── */
-const FM = { machine: null, path: "/", sel: null, original: "", current: null, open: new Set(), kids: new Map() };
+/* ── 文件管理器:一棵树,增删改查 + 拖拽上传 + 下载 + 按类型分派的查看/编辑 ──
+ * 范围由服务端定(机器级 = 该机器声明的挂载根,例如 /root;**不是 /**),
+ * 所以树从那个根起算、面包屑也从它起算 —— 界面上根本没有通向范围之外的路。 */
+const FM = { machine: null, path: "", root: null, roots: [], sel: null, original: "", current: null, open: new Set(), kids: new Map() };
 const FM_IMG = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
 const FM_NB = /\.ipynb$/i;
 const FM_JSON = /\.(json|jsonl|geojson)$/i;
 const FM_MD = /\.(md|markdown)$/i;
 const FM_CSV = /\.(csv|tsv)$/i;
 
-function fmOpen(machine) {
-  FM.machine = machine; FM.path = "/"; FM.sel = null; FM.original = ""; FM.current = null;
-  FM.open = new Set(["/"]); FM.kids = new Map();
+async function fmOpen(machine) {
+  FM.machine = machine; FM.path = ""; FM.root = null; FM.roots = [];
+  FM.sel = null; FM.original = ""; FM.current = null;
+  FM.open = new Set(); FM.kids = new Map();
   document.getElementById("fmTitle").textContent = `文件 · ${machine}`;
   document.getElementById("fm").classList.add("open");
   document.getElementById("fmPane").innerHTML = '<div class="fm-empty">← 选一个文件查看/编辑,或把文件拖到左边上传</div>';
-  fmStatus("");
-  fmList();
+  fmStatus("读取访问范围…");
+  try {
+    const r = await api(`/api/rw/whoami?name=${encodeURIComponent(machine)}`);
+    const scope = r.machine;
+    if (!scope || !(scope.roots || []).length) {
+      fmStatus(r.error || "这台机器没有可访问的范围(在 servers.json 上给它写 roots)", "fm-err");
+      document.getElementById("fmList").innerHTML = '<div class="fm-empty fm-err">没有可访问的范围</div>';
+      return;
+    }
+    FM.roots = scope.roots;
+    FM.root = scope.roots[0];
+    FM.path = FM.root;
+    FM.open = new Set([FM.root]);
+    document.getElementById("fmTitle").textContent =
+      `文件 · ${machine}（范围 ${FM.root}${FM.roots.length > 1 ? ` 等 ${FM.roots.length} 处` : ""}）`;
+    fmCrumbs();
+    await fmList();
+  } catch (e) {
+    fmStatus(`读取范围失败: ${e.message}`, "fm-err");
+    document.getElementById("fmList").innerHTML = `<div class="fm-empty fm-err">${esc(e.message)}</div>`;
+  }
 }
 function fmClose() {
   if (FM.original && !confirm("有未保存的修改,确定关闭?")) return;
@@ -470,11 +492,12 @@ function fmtTime(ms) {
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 function fmCrumbs() {
-  const parts = FM.path.split("/").filter(Boolean);
   const el = document.getElementById("fmCrumbs");
-  el.innerHTML = `<a onclick="fmSelect('/')">/</a>`;
-  let acc = "";
-  for (const p of parts) {
+  if (!FM.root) { el.innerHTML = ""; return }
+  const rel = FM.path === FM.root ? "" : FM.path.slice(FM.root.length + 1);
+  el.innerHTML = `<a onclick="fmSelect('${esc(FM.root)}')" title="${esc(FM.root)}">🏠 ${esc(FM.root.split("/").filter(Boolean).pop() || FM.root)}</a>`;
+  let acc = FM.root;
+  for (const p of rel.split("/").filter(Boolean)) {
     acc += `/${p}`;
     const target = acc;
     el.innerHTML += `<span>›</span><a onclick="fmSelect('${esc(target)}')">${esc(p)}</a>`;
@@ -500,18 +523,20 @@ async function fmToggle(path) {
   FM.path = path; fmCrumbs();
   try { await ensureKids(path); fmRenderTree() } catch (e) { fmStatus(`读取失败: ${e.message}`, "fm-err") }
 }
-/** 重建整棵树(保留展开状态;子目录按需懒加载)。 */
+/** 重建整棵树(保留展开状态;子目录按需懒加载)。根 = 服务端给的范围根。 */
 function fmRenderTree() {
   const el = document.getElementById("fmList");
   el.innerHTML = "";
-  if (!FM.kids.has("/")) { el.innerHTML = '<div class="fm-empty">读取中…</div>'; return }
-  el.appendChild(fmNode({ name: "/", dir: true, size: 0, mtime: 0 }, "", 0, true));
+  if (!FM.root) { el.innerHTML = '<div class="fm-empty">没有可访问的范围</div>'; return }
+  if (!FM.kids.has(FM.root)) { el.innerHTML = '<div class="fm-empty">读取中…</div>'; return }
+  el.appendChild(fmNode({ path: FM.root, name: FM.root, dir: true, size: 0, mtime: 0 }, "", 0, true));
   const n = FM.kids.get(FM.path);
-  fmStatus(`${FM.path}${n ? ` · ${n.length} 项` : ""}`);
+  fmStatus(`范围 ${FM.root} · ${FM.path}${n ? ` · ${n.length} 项` : ""}`);
 }
 const FM_CAP = 500; // 单个目录最多渲染多少个子项(避免超大目录把页面拖垮)
 function fmNode(entry, parentPath, depth, isRoot = false) {
-  const path = isRoot ? "/" : fmJoin(parentPath, entry.name);
+  const path = isRoot ? entry.path : fmJoin(parentPath, entry.name);
+  const label = isRoot ? (FM.root.split("/").filter(Boolean).pop() || FM.root) : entry.name;
   const wrap = document.createElement("div");
   wrap.className = "fm-node";
   const row = document.createElement("div");
@@ -521,14 +546,15 @@ function fmNode(entry, parentPath, depth, isRoot = false) {
   row.draggable = !entry.dir;
   const opened = entry.dir && FM.open.has(path);
   const caret = entry.dir ? `<span class="caret">${opened ? "▾" : "▸"}</span>` : `<span class="caret"></span>`;
-  const ico = entry.dir ? "📁" : FM_IMG.test(entry.name) ? "🖼" : FM_NB.test(entry.name) ? "📓" : "📄";
+  const ico = isRoot ? "🏠" : entry.dir ? "📁" : FM_IMG.test(entry.name) ? "🖼" : FM_NB.test(entry.name) ? "📓" : "📄";
   row.innerHTML = caret + `<span class="ico">${ico}</span>`
-    + `<span class="nm">${esc(isRoot ? "/" : entry.name)}</span>`
+    + `<span class="nm"${isRoot ? ` title="${esc(path)}"` : ""}>${esc(isRoot ? label : entry.name)}</span>`
     + `<span class="mt">${entry.dir ? "" : `${fmtSize(entry.size)} ${fmtTime(entry.mtime)}`}</span>`
     + `<span class="acts">`
     + (entry.dir ? "" : `<button onclick="event.stopPropagation();fmDownload('${esc(path)}')" title="下载">⬇</button>`)
-    + `<button onclick="event.stopPropagation();fmRename('${esc(path)}')" title="重命名">✏️</button>`
-    + `<button onclick="event.stopPropagation();fmDelete('${esc(path)}',${entry.dir})" title="删除">🗑</button>`
+    // 范围根不给重命名/删除(服务端也会拒)
+    + (isRoot ? "" : `<button onclick="event.stopPropagation();fmRename('${esc(path)}')" title="重命名">✏️</button>`)
+    + (isRoot ? "" : `<button onclick="event.stopPropagation();fmDelete('${esc(path)}',${entry.dir})" title="删除">🗑</button>`)
     + `</span>`;
   row.onclick = () => (entry.dir ? fmToggle(path) : fmOpenFileAt(path, entry.name));
   if (entry.dir) {
@@ -560,11 +586,12 @@ function fmNode(entry, parentPath, depth, isRoot = false) {
   }
   return wrap;
 }
-/** 首次进入:加载根目录并展开。 */
+/** 首次进入:加载范围根并展开。 */
 async function fmList() {
+  if (!FM.root) return;
   try {
-    await ensureKids("/");
-    FM.open.add("/");
+    await ensureKids(FM.root);
+    FM.open.add(FM.root);
     fmRenderTree();
   } catch (e) {
     document.getElementById("fmList").innerHTML = `<div class="fm-empty fm-err">${esc(e.message)}</div>`;

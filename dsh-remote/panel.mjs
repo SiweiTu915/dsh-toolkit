@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
+import { readWorkbenchRoots, machineRoots, fencePath, describeScope } from "./lib/scope.mjs";
 import { createWorkbench, planWorkbench, rollbackWorkbench, pickFreePort } from "./workbench.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -62,7 +63,7 @@ function machinesWithConn() {
   for (const s of loadServers()) {
     try {
       const c = resolveConn(s, {});
-      out.push({ name: s.name, label: s.label || s.name, host: c.host, port: c.port, user: c.user });
+      out.push({ name: s.name, label: s.label || s.name, host: c.host, port: c.port, user: c.user, roots: machineRoots(s) });
     } catch { /* 无连接信息,跳过 */ }
   }
   return out;
@@ -76,6 +77,59 @@ function loadServers() {
 }
 function saveServers(servers) {
   writeFileSync(CONFIG, JSON.stringify({ servers }, null, 2) + "\n", "utf8");
+}
+
+/* ── /api/rw/* 的访问范围(围栏)───────────────────────────────────────────
+ * 面板这条路径持有 SSH 凭据,原先对它来说「能打开页面」=「能读写远程整台机器」,
+ * 而且完全绕开 fs provider 上那三档权限(那三档只管模型的文件工具)。这里按调用方
+ * 分两种范围,并在服务端强制(客户端给的路径一律不信任):
+ *   带 port → 该工作台**注册的工作区**(最窄;侧栏插件走这条)
+ *   带 name → 该机器声明的**挂载根**(面板自己的文件管理器;不是 /)
+ * 想在某台机器上调整,在 servers.json 条目上写显式 `roots: [...]`。
+ */
+function resolveScope(params) {
+  const servers = loadServers();
+  const port = Number(params.port || 0);
+  if (port) {
+    const s = servers.find((x) => Number(x.localPort ?? x.dshPort) === port || Number(x.dshPort) === port);
+    if (!s) return { error: `端口 ${port} 没有对应的机器(先在面板里登记)` };
+    const base = { name: s.name, label: s.label || s.name };
+    const ws = readWorkbenchRoots(s.name);
+    if (ws.roots.length) return { ...base, kind: "workspace", roots: ws.roots, titles: ws.titles, note: ws.note };
+    return { ...base, kind: "machine", roots: machineRoots(s), note: "该工作台还没登记工作区,暂按机器挂载根" };
+  }
+  const name = params.name;
+  if (!name) return { error: "缺少 port(工作台)或 name(机器)" };
+  const s = servers.find((x) => x.name === name);
+  if (!s) return { error: `未找到机器 "${name}"` };
+  return { name: s.name, label: s.label || s.name, kind: "machine", roots: machineRoots(s) };
+}
+
+class OutOfScope extends Error {
+  constructor(scope, resolved) {
+    super(`越界:${resolved} 不在允许范围内(${describeScope(scope)})` +
+      (scope.kind === "workspace"
+        ? " —— 这个文件管理器只能读写本工作台登记的工作区"
+        : " —— 面板只能读写该机器的挂载根"));
+    this.code = "RW_OUT_OF_SCOPE";
+  }
+}
+
+/** 过围栏并把 symlink 解析掉;返回可以真正落盘/读取的路径。越界抛 OutOfScope。 */
+async function permitted(conn, scope, target) {
+  const r = await fencePath(conn, target, scope.roots);
+  if (!r.ok) throw new OutOfScope(scope, r.resolved || target);
+  return r.resolved;
+}
+
+function fail(e, what) {
+  if (e?.code === "RW_OUT_OF_SCOPE") return [403, { error: e.message, code: e.code }];
+  return [400, { error: `${what}: ${e.message}` }];
+}
+
+/** 取范围里的机器连接(带 port 时机器名由服务端定,客户端说了不算)。 */
+async function connFor(scope) {
+  return getFileConn(scope.name);
 }
 
 /** 读取请求体（JSON）。 */
@@ -618,34 +672,39 @@ const server = createServer(async (req, res) => {
       send(200, { machines: machinesWithConn() });
       return;
     }
-    // 「我是谁」:按工作台端口反查它属于哪台机器 —— 每个分区工作台只服务自己那台
+    // 「我是谁」:按工作台端口反查它属于哪台机器 **以及它的访问范围** ——
+    // 每个分区工作台只服务自己那台;范围由服务端按端口算出,客户端改不了。
     if (url.pathname === "/api/rw/whoami") {
       const port = Number(url.searchParams.get("port") || 0);
+      const name = url.searchParams.get("name");
       const all = machinesWithConn();
-      let hit;
-      if (port) {
-        hit = loadServers().find((s) => Number(s.localPort ?? s.dshPort) === port || Number(s.dshPort) === port);
-      }
+      const scope = resolveScope({ port, name });
       let machine = null;
-      if (hit) {
+      if (!scope.error) {
+        const hit = loadServers().find((s) => s.name === scope.name);
         try {
           const c = resolveConn(hit, {});
           machine = {
             name: hit.name, label: hit.label || hit.name,
             host: c.host, port: c.port, user: c.user,
-            defaultPath: hit.conn?.defaultPath || "/root",
+            scope: scope.kind,                 // "workspace" = 只能碰本工作台登记的工作区
+            roots: scope.roots,                // 允许的根(远程拼写)
+            titles: scope.titles || {},        // 工作区标题,给树当节点名
+            note: scope.note,
+            defaultPath: scope.roots[0] || null,
           };
         } catch { /* 无连接信息则视为未匹配 */ }
       }
-      send(200, { port, machine, machines: all });
+      send(200, { port, machine, error: scope.error, machines: all });
       return;
     }
     if (url.pathname === "/api/rw/list") {
-      const name = url.searchParams.get("name");
-      const path = url.searchParams.get("path") || "/";
+      const scope = resolveScope({ port: url.searchParams.get("port"), name: url.searchParams.get("name") });
+      if (scope.error) return send(400, { error: scope.error });
+      const path = url.searchParams.get("path") || scope.roots[0];
       try {
-        const conn = await getFileConn(name);
-        const target = path;
+        const conn = await connFor(scope);
+        const target = await permitted(conn, scope, path);
         const st = await conn.stat(target).catch(() => null);
         if (st && !st.isDirectory()) return send(400, { error: `${target} 不是目录` });
         const entries = await conn.readdir(target);
@@ -655,106 +714,134 @@ const server = createServer(async (req, res) => {
           size: e.attrs.size ?? 0,
           mtime: (e.attrs.mtime ?? 0) * 1000,
         })).sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
-        send(200, { path: target, entries: list });
+        send(200, { path: target, scope: scope.kind, roots: scope.roots, entries: list });
       } catch (e) {
-        send(400, { error: `读取目录失败: ${e.message}` });
+        send(...fail(e, "读取目录失败"));
       }
       return;
     }
     if (url.pathname === "/api/rw/read") {
-      const name = url.searchParams.get("name");
+      const scope = resolveScope({ port: url.searchParams.get("port"), name: url.searchParams.get("name") });
+      if (scope.error) return send(400, { error: scope.error });
       const path = url.searchParams.get("path");
       try {
-        const conn = await getFileConn(name);
-        const st = await conn.stat(path);
+        const conn = await connFor(scope);
+        const target = await permitted(conn, scope, path);
+        const st = await conn.stat(target);
         if (st.size > MAX_READ_BYTES) {
-          return send(200, { path, size: st.size, truncated: true, text: "" , note: `文件 ${st.size} 字节,超过 ${MAX_READ_BYTES} 字节上限,请用命令行 rw.mjs read --head/--tail` });
+          return send(200, { path: target, size: st.size, truncated: true, text: "" , note: `文件 ${st.size} 字节,超过 ${MAX_READ_BYTES} 字节上限,请用命令行 rw.mjs read --head/--tail` });
         }
-        const buf = await conn.readFile(path);
+        const buf = await conn.readFile(target);
         const binary = buf.includes(0);
         send(200, {
-          path, size: st.size, truncated: false,
+          path: target, size: st.size, truncated: false,
           binary,
           text: binary ? "" : buf.toString("utf8"),
           note: binary ? "二进制文件,不显示内容" : undefined,
         });
       } catch (e) {
-        send(400, { error: `读取文件失败: ${e.message}` });
+        send(...fail(e, "读取文件失败"));
       }
       return;
     }
     if (url.pathname === "/api/rw/write" && req.method === "POST") {
       const body = await readBody(req);
+      const scope = resolveScope(body);
+      if (scope.error) return send(400, { error: scope.error });
       try {
-        const conn = await getFileConn(body.name);
-        const existed = await conn.stat(body.path).then(() => true).catch(() => false);
-        await conn.writeFile(body.path, Buffer.from(String(body.text ?? "")));
-        send(200, { ok: true, path: body.path, existed });
+        const conn = await connFor(scope);
+        const target = await permitted(conn, scope, body.path);
+        const existed = await conn.stat(target).then(() => true).catch(() => false);
+        await conn.writeFile(target, Buffer.from(String(body.text ?? "")));
+        send(200, { ok: true, path: target, existed });
       } catch (e) {
-        send(400, { error: `保存失败: ${e.message}` });
+        send(...fail(e, "保存失败"));
       }
       return;
     }
     if (url.pathname === "/api/rw/mkdir" && req.method === "POST") {
       const body = await readBody(req);
+      const scope = resolveScope(body);
+      if (scope.error) return send(400, { error: scope.error });
       try {
-        const conn = await getFileConn(body.name);
-        await conn.mkdirp(body.path);
-        send(200, { ok: true, path: body.path });
+        const conn = await connFor(scope);
+        const target = await permitted(conn, scope, body.path);
+        await conn.mkdirp(target);
+        send(200, { ok: true, path: target });
       } catch (e) {
-        send(400, { error: `建目录失败: ${e.message}` });
+        send(...fail(e, "建目录失败"));
       }
       return;
     }
     if (url.pathname === "/api/rw/rm" && req.method === "POST") {
       const body = await readBody(req);
+      const scope = resolveScope(body);
+      if (scope.error) return send(400, { error: scope.error });
       try {
-        const conn = await getFileConn(body.name);
-        const st = await conn.stat(body.path).catch(() => null);
+        const conn = await connFor(scope);
+        const target = await permitted(conn, scope, body.path);
+        const st = await conn.stat(target).catch(() => null);
         if (!st) return send(404, { error: "路径不存在" });
+        // 额外一道:不许把范围根本身删掉(否则一次误点就清空整个工作区)
+        if (scope.roots.some((r) => r === target)) {
+          return send(403, { error: `拒绝删除范围根 ${target} —— 一次误点会清掉整个${scope.kind === "workspace" ? "工作区" : "挂载根"}` });
+        }
         if (st.isDirectory()) {
           if (!body.recursive) return send(400, { error: "目录需要勾选递归删除" });
-          const r = await conn.exec(`rm -rf '${String(body.path).replace(/'/g, "'\\''")}'`);
+          const r = await conn.exec(`rm -rf '${String(target).replace(/'/g, "'\\''")}'`);
           if (r.code !== 0) return send(400, { error: r.stderr || "删除失败" });
         } else {
-          await conn.unlink(body.path);
+          await conn.unlink(target);
         }
-        send(200, { ok: true, path: body.path });
+        send(200, { ok: true, path: target });
       } catch (e) {
-        send(400, { error: `删除失败: ${e.message}` });
+        send(...fail(e, "删除失败"));
       }
       return;
     }
     if (url.pathname === "/api/rw/mv" && req.method === "POST") {
       const body = await readBody(req);
+      const scope = resolveScope(body);
+      if (scope.error) return send(400, { error: scope.error });
       try {
-        const conn = await getFileConn(body.name);
-        await conn.rename(body.from, body.to);
-        send(200, { ok: true });
+        const conn = await connFor(scope);
+        // 两端都要过围栏:否则「范围内 → 范围外」就是一条把文件搬出工作区的路
+        const from = await permitted(conn, scope, body.from);
+        const to = await permitted(conn, scope, body.to);
+        if (scope.roots.some((r) => r === from)) return send(403, { error: `拒绝移动范围根 ${from}` });
+        await conn.rename(from, to);
+        send(200, { ok: true, from, to });
       } catch (e) {
-        send(400, { error: `重命名失败: ${e.message}` });
+        send(...fail(e, "重命名失败"));
       }
       return;
     }
     // ── 下载:把远程文件以附件流回浏览器(二进制安全,浏览器自己落盘)──────
     if (url.pathname === "/api/rw/download") {
-      const name = url.searchParams.get("name");
+      const scope = resolveScope({ port: url.searchParams.get("port"), name: url.searchParams.get("name") });
+      if (scope.error) return send(400, { error: scope.error });
       const remote = url.searchParams.get("path");
-      if (!name || !remote) return send(400, { error: "缺少 name / path" });
+      if (!remote) return send(400, { error: "缺少 path" });
       let conn;
       try {
-        conn = await getFileConn(name);
+        conn = await connFor(scope);
       } catch (e) {
         return send(400, { error: `连接失败: ${e.message}` });
       }
+      let target;
+      try {
+        target = await permitted(conn, scope, remote);
+      } catch (e) {
+        return send(403, { error: e.message, code: e.code });
+      }
       let st;
       try {
-        st = await conn.stat(remote);
+        st = await conn.stat(target);
         if (st.isDirectory?.()) return send(400, { error: "目录不能直接下载(先打包,或用 rw.mjs tree 看结构)" });
       } catch (e) {
         return send(404, { error: `文件不存在: ${e.message}` });
       }
-      const base = remote.split("/").pop() || "download";
+      const base = target.split("/").pop() || "download";
       const ascii = base.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'");
       res.writeHead(200, {
         "Content-Type": "application/octet-stream",
@@ -763,7 +850,7 @@ const server = createServer(async (req, res) => {
         "Cache-Control": "no-store",
         ...cors,
       });
-      const stream = conn.sftp.createReadStream(remote);
+      const stream = conn.sftp.createReadStream(target);
       stream.on("error", () => { try { res.destroy(); } catch { /* 已断 */ } });
       res.on("close", () => { try { stream.destroy(); } catch { /* 已结束 */ } });
       stream.pipe(res);
@@ -771,14 +858,21 @@ const server = createServer(async (req, res) => {
     }
     // ── 上传:请求体就是原始字节,直接管道进 SFTP(不走 JSON,不限大小)──
     if (url.pathname === "/api/rw/upload" && req.method === "POST") {
-      const name = url.searchParams.get("name");
-      const dest = url.searchParams.get("path");
-      if (!name || !dest) return send(400, { error: "缺少 name / path" });
+      const scope = resolveScope({ port: url.searchParams.get("port"), name: url.searchParams.get("name") });
+      if (scope.error) return send(400, { error: scope.error });
+      const destParam = url.searchParams.get("path");
+      if (!destParam) return send(400, { error: "缺少 path" });
       let conn;
       try {
-        conn = await getFileConn(name);
+        conn = await connFor(scope);
       } catch (e) {
         return send(400, { error: `连接失败: ${e.message}` });
+      }
+      let dest;
+      try {
+        dest = await permitted(conn, scope, destParam);
+      } catch (e) {
+        return send(403, { error: e.message, code: e.code });
       }
       const parent = dest.includes("/") ? dest.slice(0, dest.lastIndexOf("/")) : ".";
       try {
