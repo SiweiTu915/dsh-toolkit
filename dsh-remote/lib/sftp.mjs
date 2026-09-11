@@ -158,6 +158,26 @@ export async function connect(cfg) {
     })
   }
 
+  /**
+   * 改名/移动。**优先用 posix-rename 扩展**:普通 `SSH_FXP_RENAME` 在目标已存在时
+   * 会被 OpenSSH 按 SFTP v3 规范拒绝(报 code 4 Failure),而 `ext_openssh_rename`
+   * 走真正的 `rename(2)`,可覆盖。服务端不支持该扩展时退回普通 rename。
+   */
+  async function rename(a, b) {
+    const from = normalizeRemotePath(a)
+    const to = normalizeRemotePath(b)
+    if (typeof sftp.ext_openssh_rename === 'function') {
+      try {
+        await new Promise((resolve, reject) => {
+          sftp.ext_openssh_rename(from, to, (err) => (err ? reject(err) : resolve()))
+        })
+        return { from, to }
+      } catch { /* 服务端不支持扩展 → 退回普通 rename */ }
+    }
+    await renameRaw(from, to)
+    return { from, to }
+  }
+
   return {
     sftp,
     stat,
@@ -166,7 +186,7 @@ export async function connect(cfg) {
     writeFile,
     mkdirp,
     unlink: (p2) => unlinkRaw(normalizeRemotePath(p2)),
-    rename: (a, b) => renameRaw(normalizeRemotePath(a), normalizeRemotePath(b)),
+    rename,
     rmdir: (p2) => rmdirRaw(normalizeRemotePath(p2)),
     utimes: (p2, atime, mtime) => utimesRaw(normalizeRemotePath(p2), atime, mtime),
     walk,
