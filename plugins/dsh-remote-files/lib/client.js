@@ -27,6 +27,10 @@ window.__ModuleLoader__.load({
 
 		/** 面板默认端口;可用 localStorage["dshRemotePanel"] 覆盖。 */
 		const panelBase = () => localStorage.getItem("dshRemotePanel") || "http://127.0.0.1:4100";
+		// 每个请求都带上本工作台的端口 —— 面板据此在**服务端**算出访问范围
+		// (本工作台登记的工作区),客户端说不了算,也不会退化成整台机器。
+		const WS_PORT = Number(location.port || 80);
+		const SCOPE = `port=${WS_PORT}`;
 		const TAB_ID = "dsh-remote-files";
 		const TAB_KIND = "dsh-remote-files";
 
@@ -35,6 +39,7 @@ window.__ModuleLoader__.load({
 .drf{display:flex;flex-direction:column;height:100%;min-height:0;font-size:13px;color:var(--dsw-alias-label-primary)}
 .drf-head{display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);flex-wrap:wrap}
 .drf-title{font-weight:600;font-size:13px}
+.drf-scope{font-size:10px;padding:1px 6px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-1);cursor:help;white-space:nowrap}
 .drf-crumb{flex:1;display:flex;gap:2px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,Menlo,monospace);overflow:hidden}
 .drf-crumb a{color:var(--dsw-alias-state-business-primary);cursor:pointer;text-decoration:none}
 .drf-bar{display:flex;gap:6px;flex-wrap:wrap;padding:6px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
@@ -105,7 +110,7 @@ window.__ModuleLoader__.load({
 		const isJson = (n) => /\.(json|geojson)$/i.test(n);
 		const isMd = (n) => /\.(md|markdown)$/i.test(n);
 		const isCsv = (n) => /\.(csv|tsv)$/i.test(n);
-		const dlUrl = (m, path) => `${panelBase()}/api/rw/download?${qs({ name: m, path })}`;
+		const dlUrl = (path) => `${panelBase()}/api/rw/download?${SCOPE}&${qs({ path })}`;
 
 		function mdToHtml(src) {
 			let s = String(src).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -125,13 +130,14 @@ window.__ModuleLoader__.load({
 		function Icon({ children }) { return h("span", { className: "ico" }, children) }
 
 		function Pane() {
-			const [machine, setMachine] = react.useState(null);   // whoami 返回的是对象 {name,label,host,port,user,defaultPath}
-			const mname = machine ? machine.name : null;
+			const [machine, setMachine] = react.useState(null);   // whoami 的 machine:{name,label,scope,roots,titles,note}
+			const [roots, setRoots] = react.useState([]);         // 允许访问的根(服务端按端口算出,最窄 = 本工作台的工作区)
+			const [titles, setTitles] = react.useState({});
 			const [err, setErr] = react.useState("");
 			const [msg, setMsg] = react.useState("");
 			const [kids, setKids] = react.useState({});     // path → entries[]
-			const [open, setOpen] = react.useState({ "/": true });
-			const [dir, setDir] = react.useState("/");      // 新建/上传落点
+			const [open, setOpen] = react.useState({});
+			const [dir, setDir] = react.useState("");       // 新建/上传落点
 			const [sel, setSel] = react.useState(null);     // 选中的文件路径
 			const [file, setFile] = react.useState(null);   // {name,path,text,original,size,binary}
 			const [prev, setPrev] = react.useState(false);  // markdown 预览开关
@@ -142,22 +148,25 @@ window.__ModuleLoader__.load({
 
 			react.useEffect(() => {
 				let alive = true;
-				api(`/api/rw/whoami?port=${Number(location.port || 80)}`)
+				api(`/api/rw/whoami?port=${WS_PORT}`)
 					.then((r) => {
 						if (!alive) return;
-						if (!r.machine) { setErr("这个端口没有对应的机器(先在 dsh-remote 面板里登记)"); return }
+						if (!r.machine) { setErr(r.error || "这个端口没有对应的机器(先在 dsh-remote 面板里登记)"); return }
 						setMachine(r.machine);
-						const start = r.machine.defaultPath || "/";
-						setDir(start);
-						return load(start, r.machine.name);
+						const rs = r.machine.roots || [];
+						setRoots(rs);
+						setTitles(r.machine.titles || {});
+						if (!rs.length) { setErr(r.machine.note || "这个工作台还没登记工作区,没有可访问的范围"); return }
+						setDir(rs[0]);
+						setOpen({ [rs[0]]: true });
+						return load(rs[0]);
 					})
 					.catch((e) => alive && setErr(`连不上面板 ${panelBase()}:${e.message}`));
 				return () => { alive = false };
 			}, []);
 
-			async function load(path, m = mname) {
-				if (!m) return [];
-				const j = await api(`/api/rw/list?${qs({ name: m, path })}`);
+			async function load(path) {
+				const j = await api(`/api/rw/list?${SCOPE}&${qs({ path })}`);
 				const entries = j.entries || [];
 				setKids((k) => ({ ...k, [path]: entries }));
 				setRev((r) => r + 1);
@@ -175,7 +184,7 @@ window.__ModuleLoader__.load({
 				setSel(path); setDir(parent(path)); setPrev(false); setBusy(true);
 				try {
 					if (isImg(name)) { setFile({ name, path, kind: "image" }); return }
-					const j = await api(`/api/rw/read?${qs({ name: mname, path })}`);
+					const j = await api(`/api/rw/read?${SCOPE}&${qs({ path })}`);
 					if (j.binary) { setFile({ name, path, kind: "binary", size: j.size }); return }
 					setFile({ name, path, kind: "text", text: j.text, original: j.text, size: j.size });
 				} catch (e) { setErr(e.message) } finally { setBusy(false) }
@@ -184,7 +193,7 @@ window.__ModuleLoader__.load({
 				if (!file || file.kind !== "text") return;
 				setBusy(true);
 				try {
-					await post("/api/rw/write", { name: mname, path: file.path, text: file.text });
+					await post("/api/rw/write", { port: WS_PORT, path: file.path, text: file.text });
 					setFile({ ...file, original: file.text });
 					toast(`✓ 已保存 ${file.path}`);
 					load(parent(file.path));
@@ -198,7 +207,7 @@ window.__ModuleLoader__.load({
 					for (const f of list) {
 						const dest = join(targetDir, f.name);
 						toast(`⬆ 上传 ${f.name}(${fmtSize(f.size)})…`);
-						const r = await fetch(`${panelBase()}/api/rw/upload?${qs({ name: mname, path: dest })}`, { method: "POST", body: f });
+						const r = await fetch(`${panelBase()}/api/rw/upload?${SCOPE}&${qs({ path: dest })}`, { method: "POST", body: f });
 						const j = await r.json().catch(() => ({}));
 						if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
 						toast(`✓ 已上传 ${dest}(${fmtSize(j.bytes)})`);
@@ -208,7 +217,7 @@ window.__ModuleLoader__.load({
 			}
 			function download(path) {
 				const a = document.createElement("a");
-				a.href = dlUrl(mname, path);
+				a.href = dlUrl(path);
 				a.download = path.split("/").pop() || "";
 				document.body.appendChild(a); a.click(); a.remove();
 				toast(`⬇ 开始下载 ${path}`);
@@ -216,38 +225,41 @@ window.__ModuleLoader__.load({
 			async function newFile() {
 				const name = prompt(`在 ${dir} 下新建文件名`);
 				if (!name) return;
-				try { await post("/api/rw/write", { name: mname, path: join(dir, name), text: "" }); await load(dir); openFile(join(dir, name), name) }
+				try { await post("/api/rw/write", { port: WS_PORT, path: join(dir, name), text: "" }); await load(dir); openFile(join(dir, name), name) }
 				catch (e) { setErr(e.message) }
 			}
 			async function newDir() {
 				const name = prompt(`在 ${dir} 下新建文件夹名`);
 				if (!name) return;
-				try { await post("/api/rw/mkdir", { name: mname, path: join(dir, name) }); await load(dir); setOpen((o) => ({ ...o, [dir]: true })) }
+				try { await post("/api/rw/mkdir", { port: WS_PORT, path: join(dir, name) }); await load(dir); setOpen((o) => ({ ...o, [dir]: true })) }
 				catch (e) { setErr(e.message) }
 			}
 			async function rename(path) {
 				const name = path.split("/").pop();
 				const to = prompt(`重命名 ${name} →`, name);
 				if (!to || to === name) return;
-				try { await post("/api/rw/mv", { name: mname, from: path, to: join(parent(path), to) }); delete kids[parent(path)]; await load(parent(path)) }
+				try { await post("/api/rw/mv", { port: WS_PORT, from: path, to: join(parent(path), to) }); delete kids[parent(path)]; await load(parent(path)) }
 				catch (e) { setErr(e.message) }
 			}
 			async function del(path, isDir) {
 				if (!confirm(`删除 ${path}${isDir ? "(目录,递归)" : ""}?`)) return;
 				try {
-					await post("/api/rw/rm", { name: mname, path, recursive: isDir });
+					await post("/api/rw/rm", { port: WS_PORT, path, recursive: isDir });
 					if (sel === path) { setSel(null); setFile(null) }
 					delete kids[parent(path)]; await load(parent(path));
 				} catch (e) { setErr(e.message) }
 			}
 
 			/* ---- 渲染:树 ---- */
+			// 顶层不是 "/" 而是**服务端给的范围根**(本工作台登记的工作区)。
+			// 树只在范围之内展开;越界的路径服务端一律 403,这里根本走不到。
 			function node(entry, parentPath, depth, isRoot) {
-				const path = isRoot ? "/" : join(parentPath, entry.name);
+				const path = isRoot ? entry.path : join(parentPath, entry.name);
 				const isDir = isRoot ? true : entry.dir;
+				const label = isRoot ? (titles[path] || path.split("/").filter(Boolean).pop() || path) : entry.name;
 				const expanded = isDir && open[path];
 				const caret = isDir ? (expanded ? "▾" : "▸") : "";
-				const ico = isDir ? "📁" : isImg(entry.name) ? "🖼" : isNb(entry.name) ? "📓" : "📄";
+				const ico = isRoot ? "🏠" : isDir ? "📁" : isImg(entry.name) ? "🖼" : isNb(entry.name) ? "📓" : "📄";
 				const row = h("div", {
 					key: path,
 					className: "drf-row",
@@ -263,17 +275,18 @@ window.__ModuleLoader__.load({
 						const files = e.dataTransfer.files;
 						if (files && files.length) { setOpen((o) => ({ ...o, [path]: true })); return uploadTo(path, files) }
 						const from = e.dataTransfer.getData("text/drf-move");
-						if (from && parent(from) !== path) { try { await post("/api/rw/mv", { name: mname, from, to: join(path, from.split("/").pop()) }); delete kids[parent(from)]; delete kids[path]; await load(path) } catch (er) { setErr(er.message) } }
+						if (from && parent(from) !== path) { try { await post("/api/rw/mv", { port: WS_PORT, from, to: join(path, from.split("/").pop()) }); delete kids[parent(from)]; delete kids[path]; await load(path) } catch (er) { setErr(er.message) } }
 					} : undefined,
 				},
 					h("span", { className: "drf-caret" }, caret),
 					h("span", {}, ico),
-					h("span", { className: "drf-nm" }, isRoot ? "/" : entry.name),
+					h("span", { className: "drf-nm", title: isRoot ? path : undefined }, label),
 					h("span", { className: "drf-mt" }, isDir ? "" : `${fmtSize(entry.size)}`),
 					h("span", { className: "drf-acts" },
 						isDir ? null : h("button", { title: "下载", onClick: (e) => { e.stopPropagation(); download(path) } }, "⬇"),
-						h("button", { title: "重命名", onClick: (e) => { e.stopPropagation(); rename(path) } }, "✏️"),
-						h("button", { title: "删除", onClick: (e) => { e.stopPropagation(); del(path, isDir) } }, "🗑"),
+						// 范围根不给重命名/删除:服务端也会拒,不如一开始就不摆出来
+						isRoot ? null : h("button", { title: "重命名", onClick: (e) => { e.stopPropagation(); rename(path) } }, "✏️"),
+						isRoot ? null : h("button", { title: "删除", onClick: (e) => { e.stopPropagation(); del(path, isDir) } }, "🗑"),
 					),
 				);
 				const box = [row];
@@ -292,7 +305,7 @@ window.__ModuleLoader__.load({
 			/* ---- 渲染:编辑器 / 预览 ---- */
 			function editor() {
 				if (!file) return h("div", { className: "drf-empty" }, "← 点一个文件查看/编辑;拖文件进树里上传");
-				if (file.kind === "image") return h("div", { className: "drf-prev" }, h("img", { className: "drf-img", src: dlUrl(mname, file.path), alt: file.name }));
+				if (file.kind === "image") return h("div", { className: "drf-prev" }, h("img", { className: "drf-img", src: dlUrl(file.path), alt: file.name }));
 				if (file.kind === "binary") return h("div", { className: "drf-empty" }, `二进制文件(${fmtSize(file.size)}),点右上角下载`);
 				const dirty = file.text !== file.original;
 				const head = h("div", { className: "drf-ehead" },
@@ -357,28 +370,39 @@ window.__ModuleLoader__.load({
 				);
 			}
 
+			// 面包屑从**所在范围根**起算 —— 根之上没有可达路径,所以不显示"/"
+			const homeRoot = roots.filter((r) => dir === r || dir.startsWith(`${r}/`)).sort((a, b) => b.length - a.length)[0] || roots[0] || "";
 			const crumbs = (() => {
-				const parts = dir.split("/").filter(Boolean);
-				const out = [h("a", { key: "/", onClick: () => setDir("/") }, "/")];
-				let acc = "";
-				for (const p of parts) {
+				if (!homeRoot) return [];
+				const rel = dir === homeRoot ? "" : dir.slice(homeRoot.length + 1);
+				const out = [h("a", { key: homeRoot, title: homeRoot, onClick: () => setDir(homeRoot) },
+					`🏠 ${titles[homeRoot] || homeRoot.split("/").filter(Boolean).pop() || homeRoot}`)];
+				let acc = homeRoot;
+				for (const p of rel.split("/").filter(Boolean)) {
 					acc += `/${p}`;
 					const target = acc;
 					out.push(h("span", { key: `${target}:s` }, "›"), h("a", { key: target, onClick: () => setDir(target) }, p));
 				}
 				return out;
 			})();
+			const scoped = machine && machine.scope === "workspace";
 
 			return h("div", { className: "drf" },
 				h("div", { className: "drf-head" },
 					h("span", { className: "drf-title" }, `📁 ${machine ? (machine.label || machine.name) : "远程文件"}`),
+					machine ? h("span", {
+						className: "drf-scope",
+						title: scoped
+							? `只能访问本工作台登记的工作区:\n${roots.join("\n")}`
+							: `只能访问该机器的挂载根:\n${roots.join("\n")}`,
+					}, scoped ? `🔒 仅工作区 ×${roots.length}` : "🔓 挂载根") : null,
 					h("span", { className: "drf-crumb" }, crumbs),
 				),
 				h("div", { className: "drf-bar" },
-					h("button", { className: "drf-btn", onClick: () => { setKids({}); load("/") } }, "🔄 刷新"),
-					h("button", { className: "drf-btn", disabled: !mname, onClick: newFile }, "📄 新建文件"),
-					h("button", { className: "drf-btn", disabled: !mname, onClick: newDir }, "📁 新建文件夹"),
-					h("button", { className: "drf-btn", "data-primary": true, disabled: !mname, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
+					h("button", { className: "drf-btn", onClick: () => { setKids({}); roots.forEach((r) => load(r).catch(() => null)) } }, "🔄 刷新"),
+					h("button", { className: "drf-btn", disabled: !roots.length, onClick: newFile }, "📄 新建文件"),
+					h("button", { className: "drf-btn", disabled: !roots.length, onClick: newDir }, "📁 新建文件夹"),
+					h("button", { className: "drf-btn", "data-primary": true, disabled: !roots.length, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
 					h("input", { ref: upRef, type: "file", multiple: true, style: { display: "none" }, onChange: (e) => { uploadTo(dir, e.target.files); e.target.value = "" } }),
 				),
 				h("div", {
@@ -386,7 +410,11 @@ window.__ModuleLoader__.load({
 					onDragOver: (e) => { e.preventDefault(); dragRef.current = true; e.currentTarget.classList.add("drag") },
 					onDragLeave: (e) => { e.currentTarget.classList.remove("drag") },
 					onDrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove("drag"); if (e.dataTransfer.files && e.dataTransfer.files.length) uploadTo(dir, e.dataTransfer.files) },
-				}, machine ? node({ name: "/", dir: true, size: 0 }, "", 0, true) : h("div", { className: "drf-empty" }, err || "正在解析这台工作台的机器…")),
+				}, machine
+					? (roots.length
+						? roots.map((r) => node({ path: r, name: r, dir: true, size: 0 }, "", 0, true))
+						: h("div", { className: "drf-empty" }, err || "这个工作台没有可访问的工作区"))
+					: h("div", { className: "drf-empty" }, err || "正在解析这台工作台的机器…")),
 				h("div", { className: "drf-editor" }, editor()),
 				h("div", { className: `drf-msg ${msg && msg.cls ? msg.cls : ""}` }, err ? h("span", { className: "drf-err" }, err) : (msg ? msg.text : "")),
 			);
@@ -400,11 +428,11 @@ window.__ModuleLoader__.load({
 				id: TAB_ID,
 				kind: TAB_KIND,
 				priority: "extension",
-				title: () => "文件(可写)",
+				title: () => "文件(仅工作区)",
 				guide: [{
 					order: 30,
-					title: () => "远程文件(可写)",
-					description: () => "浏览 / 编辑 / 上传 / 下载远程文件",
+					title: () => "远程文件(仅工作区)",
+					description: () => "浏览 / 编辑 / 上传 / 下载 —— 只能碰本工作台登记的工作区",
 				}],
 			});
 			ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({
