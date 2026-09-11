@@ -403,6 +403,84 @@ export default class SftpFileSystem extends FileSystem {
     })())
   }
 
+  /**
+   * 读 `[offset, offset + length)` 这段字节,不解码、不做二进制判定。
+   * 窗口本身就是上界:流从 offset 打开、读满 length 就停,所以无论文件多大都只
+   * 缓冲这一段;窗口起点在文件末尾或之后 → 返回空(不报错)。
+   *
+   * 语义对齐官方 `dsh-fs-local` 的 `readByteWindow`。这是 0.1.5 新增的契约方法
+   * (0.1.2 没有),供工作区文件树 / 文档预览做分页读;在 0.1.2 上多实现一个
+   * 没人调用的方法无副作用。
+   * @param target - 已解析的目标。
+   * @param range - `offset` 起始字节(0 基)与 `length` 最大字节数。
+   * @param signal - 中止读取(FS_ABORTED)。
+   * @returns 至多 `length` 字节。
+   */
+  async readByteRange(target, range, signal) {
+    throwIfAborted(signal, 'read')
+    if (typeof range?.offset !== 'number' || typeof range?.length !== 'number'
+      || !Number.isFinite(range.offset) || !Number.isFinite(range.length)
+      || range.offset < 0 || range.length < 0) {
+      throw new FsError(`cannot read "${target.displayPath}": invalid byte range`, 'FS_IO_ERROR')
+    }
+    const info = await this.probe(target.targetKey, { follow: true })
+    if (!info) throw new FsError(`cannot read "${target.displayPath}": not found`, 'FS_NOT_FOUND')
+    if (!info.isFile()) throw new FsError(`cannot read "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
+    if (range.length === 0) return new Uint8Array(0)
+    const remote = this.remotePathFor(target.targetKey)
+    const window = await this.withTransport(
+      (transport) => this.readRemoteWindow(transport, remote, range, signal),
+      'read',
+      target.displayPath,
+    )
+    throwIfAborted(signal, 'read')
+    return window
+  }
+
+  /**
+   * 经 SFTP 读一个字节窗口。用 createReadStream 的 start/end(闭区间),
+   * 越界时流自然提前结束 —— 与本地实现"窗口越界返回空"一致。
+   * @param transport - 已就绪的连接。
+   * @param remote - 远程绝对路径。
+   * @param range - offset / length。
+   * @param signal - 中止信号。
+   * @returns 窗口字节。
+   */
+  readRemoteWindow(transport, remote, range, signal) {
+    return new Promise((resolve, reject) => {
+      const stream = transport.sftp.createReadStream(remote, {
+        start: range.offset,
+        end: range.offset + range.length - 1,
+      })
+      const chunks = []
+      let bytes = 0
+      let settled = false
+      const onAbort = () => {
+        if (settled) return
+        settled = true
+        try { stream.destroy() } catch { /* 已结束 */ }
+        reject(new FsError('read aborted', 'FS_ABORTED'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        fn(value)
+      }
+      stream.on('data', (chunk) => {
+        chunks.push(chunk)
+        bytes += chunk.length
+        // start/end 已经封顶,这里再兜一层:任何实现差异都不许读超窗口
+        if (bytes > range.length) {
+          try { stream.destroy() } catch { /* 已结束 */ }
+        }
+      })
+      stream.on('error', (error) => finish(reject, mapRemoteError(error, 'read', remote)))
+      stream.on('close', () => finish(resolve, Buffer.concat(chunks, Math.min(bytes, range.length))))
+    })
+  }
+
   async readBytes(target, signal, maxBytes) {
     throwIfAborted(signal, 'read')
     const limit = maxBytes ?? this.cfg.maxBytes
