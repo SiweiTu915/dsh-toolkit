@@ -103,6 +103,10 @@ function isConnectionError(error) {
 /** SFTP 状态码 → FsError 词汇表(fs-local 用的同一套 code)。 */
 function mapRemoteError(error, verb, displayPath) {
   if (error instanceof FsError) return error
+  // 连接层失败最常见也最需要说人话:给出"连不上哪台机器",而不是一句 ECONNREFUSED
+  if (isConnectionError(error)) {
+    return new FsError(`cannot ${verb} "${displayPath}": 远程连接失败(${error?.message ?? error});检查机器是否在线、SSH 端口是否变了`, 'FS_IO_ERROR', { cause: error })
+  }
   const code = error?.code
   if (code === 2) return new FsError(`cannot ${verb} "${displayPath}": not found`, 'FS_NOT_FOUND', { cause: error })
   if (code === 3) return new FsError(`cannot ${verb} "${displayPath}": permission denied`, 'FS_PERMISSION_DENIED', { cause: error })
@@ -283,8 +287,11 @@ export default class SftpFileSystem extends FileSystem {
   async withTransport(op, verb, displayPath) {
     let lastError
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const transport = await this.transport()
+      // ⚠️ 建连也必须包在 try 里:否则连接失败会绕过 mapRemoteError 直接抛出,
+      // 上层只看到 code=UNKNOWN 的原始 net 错误。实测:远程不可达时整个回合会以
+      // "UNKNOWN: connect ECONNREFUSED …" 失败,完全看不出是哪个后端、该怎么修。
       try {
+        const transport = await this.transport()
         return await op(transport)
       } catch (error) {
         lastError = error
@@ -610,8 +617,85 @@ export default class SftpFileSystem extends FileSystem {
     }
   }
 
-  async writeText(target, content, expected, signal) {
+  /* --------------------------- 沙箱档位(per-call policy) --------------------------- */
+
+  /**
+   * 本次调用的沙箱策略。契约规定 `writeText`/`editText` 的第 5 个参数就是它
+   * (*"由 sandboxing backend 据此围栏,bare backend 忽略"*);没给就取当前会话的解析结果。
+   * @param sandboxPolicy - 调用方传入的策略(优先)。
+   * @returns 策略对象,取不到则为 undefined。
+   */
+  policyFor(sandboxPolicy) {
+    if (sandboxPolicy !== undefined) return sandboxPolicy
+    try { return this.ctx.sandboxPolicy?.resolve?.() } catch { return undefined }
+  }
+
+  /**
+   * 这台后端**按默认档位**对写操作施加的约束,或 undefined 表示不约束。
+   * 有了它,模型侧的文件工具才会如实显示"可升级到更宽档位"的字段。
+   * @returns 组合默认的档位(`ctx.sandboxPolicy.defaultMode`)。
+   */
+  get sandboxMode() {
+    try { return this.ctx.sandboxPolicy?.defaultMode } catch { return undefined }
+  }
+
+  /**
+   * 把任意可接受的拼写(本机挂载点 / 远程)统一成**挂载点拼写**,便于做"在不在工作区内"的判断。
+   * 模型可能直接写远程绝对路径(`/root/...`),不统一的话会被误判成工作区之外。
+   * @param key - targetKey 或策略里的 workspaceRoot。
+   * @returns 挂载点拼写的绝对路径(不在挂载点内时原样返回)。
+   */
+  toMountSpelling(key) {
+    const p = posix.normalize(key)
+    const { localRoot, remoteRoot } = this.cfg
+    if (!localRoot) return p
+    if (p === localRoot || p.startsWith(localRoot + '/')) return p
+    const inRemote = remoteRoot === '/' ? p.startsWith('/') : (p === remoteRoot || p.startsWith(remoteRoot + '/'))
+    return inRemote ? this.harnessPathFor(p) : p
+  }
+
+  /** `child` 是否在 `root` 之下(或就是它)。两侧都先统一成挂载点拼写。 */
+  withinWorkspace(root, child) {
+    const r = this.toMountSpelling(root)
+    const c = this.toMountSpelling(child)
+    if (c === r) return true
+    return c.startsWith(r.endsWith('/') ? r : r + '/')
+  }
+
+  /**
+   * 按 per-call 策略给写入目标加围栏 —— 与官方 `dsh-fs-sandbox` 的 `checkedTarget` 同构。
+   * 三个档位在**文件工具**上的落点:
+   *   - `read-only`         → 拒绝一切写入
+   *   - `workspace-write`   → 只允许写在 workspaceRoot 之内
+   *   - `danger-full-access`→ 放行
+   *
+   * ⚠️ 只约束文件工具。shell 命令不经过 fs 接缝,所以远程命令本身不受这套档位约束 ——
+   * 这也是为什么 `dsh-bash-sftp` 如实汇报 `sandboxMode = danger-full-access`。
+   * @param target - 已解析的目标。
+   * @param sandboxPolicy - 本次调用的策略(缺省取会话解析结果)。
+   * @returns 原 target(通过围栏)。
+   */
+  checkedTarget(target, sandboxPolicy) {
+    const policy = this.policyFor(sandboxPolicy)
+    const mode = policy?.mode
+    if (mode === undefined || mode === 'danger-full-access') return target
+    if (mode === 'read-only') {
+      throw new FsError(`cannot write "${target.displayPath}": file access denied under read-only mode`, 'FS_SANDBOX_DENIED')
+    }
+    if (mode === 'workspace-write') {
+      const root = policy.workspaceRoot
+      // 策略没带根就不围栏(与官方一致的保守取法:宁可不拦,也不误拦)
+      if (typeof root !== 'string' || root.length === 0) return target
+      if (!this.withinWorkspace(root, target.targetKey)) {
+        throw new FsError(`cannot write "${target.displayPath}": file access denied under workspace-write mode (outside ${root})`, 'FS_SANDBOX_DENIED')
+      }
+    }
+    return target
+  }
+
+  async writeText(target, content, expected, signal, sandboxPolicy) {
     this.assertWritable(target)
+    this.checkedTarget(target, sandboxPolicy)
     const remote = this.remotePathFor(target.targetKey)
     return this.withLock(target.targetKey, async () => {
       throwIfAborted(signal, 'write')
@@ -639,8 +723,9 @@ export default class SftpFileSystem extends FileSystem {
     })
   }
 
-  async editText(target, edit, expected, signal) {
+  async editText(target, edit, expected, signal, sandboxPolicy) {
     this.assertWritable(target)
+    this.checkedTarget(target, sandboxPolicy)
     const remote = this.remotePathFor(target.targetKey)
     return this.withLock(target.targetKey, async () => {
       throwIfAborted(signal, 'edit')
