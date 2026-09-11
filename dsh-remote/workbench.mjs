@@ -82,6 +82,36 @@ function enrichedPath(mainHome) {
 }
 
 /**
+ * 从源服务器条目推导 ssh 目标与参数,写进挂载配置。
+ *
+ * 为什么需要:`dsh-subprocess-sftp`(bash/glob/grep)是**调用本机 ssh 命令**的,
+ * 默认只拿到机器名,于是要求 `~/.ssh/config` 里存在同名别名 —— 而「面板里新加一台
+ * 机器」并不会创建别名。这里直接用 `用户@主机` + `-p 端口` 表达,新机器就零配置可用。
+ *
+ * 另外全新机器的 host key 还不在 known_hosts 里,而 ssh 客户端带 `BatchMode=yes`,
+ * 遇到未知主机键会直接失败 —— 所以显式 `StrictHostKeyChecking=accept-new`
+ * (首次自动接受,之后仍然校验)。
+ * @param {object} input - 创建参数(含 conn 与 sourceEntry)。
+ * @returns {object} 追加到挂载配置的字段(无主机信息时为空对象,退回按机器名走别名)。
+ */
+function sshTargetConfig(input) {
+  const source = input.sourceEntry ?? {};
+  const conn = input.conn ?? source.conn ?? source.mirror ?? {};
+  const host = conn.host ?? source.host;
+  const user = conn.user ?? source.user ?? "root";
+  const port = Number(conn.sshPort ?? source.sshPort ?? 0);
+  const out = {};
+  if (typeof host !== "string" || host.length === 0 || host === "127.0.0.1" || host === "localhost") return out;
+  out.sshTarget = `${user}@${host}`;
+  const extra = [];
+  if (Number.isInteger(port) && port > 0 && port !== 22) extra.push("-p", String(port));
+  extra.push("-o", "StrictHostKeyChecking=accept-new");
+  if (typeof conn.keyPath === "string" && conn.keyPath) extra.push("-i", conn.keyPath);
+  out.sshExtraArgs = extra;
+  return out;
+}
+
+/**
  * 从 base 开始找第一个既没被 servers.json 占用、也没在监听的端口。
  * @param {number[]} used - servers.json 里已登记的端口。
  * @param {number} base - 起始端口。
@@ -220,17 +250,18 @@ async function runCreate(plan, input, ctx, step) {
   }
   step("安装插件", true, `${plugins.length} 个已链接`);
 
-  // 4) 挂载配置(三个 provider 共用这一份)
+  // 4) 挂载配置(四个 provider 共用这一份)
   const port = input.port ?? await pickFreePort(ctx.usedPorts ?? []);
   const config = {
     remoteDir: join(ctx.mainHome, "dsh-remote"),
     server: input.sourceServer ?? name,
     remoteRoot,
     localRoot: mountRoot,
+    ...sshTargetConfig(input),
     ...plan.config,
   };
   writeFileSync(join(home, "remote-mount.json"), `${JSON.stringify(config, null, 2)}\n`);
-  step("写入挂载配置", true, `${remoteRoot} ⇄ ${mountRoot}`);
+  step("写入挂载配置", true, `${remoteRoot} ⇄ ${mountRoot}${config.sshTarget ? ` · ssh ${config.sshTarget}` : ""}`);
 
   // 5) 本机挂载点(工作区注册表要求它是本机真实目录)
   mkdirSync(mountRoot, { recursive: true });
