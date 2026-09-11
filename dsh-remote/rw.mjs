@@ -13,13 +13,14 @@
  *   node rw.mjs <命令> <机器名> [参数...]
  *   node rw.mjs ls gpu /root/project
  *   node rw.mjs read gpu /root/a.py --head 40
+ *   node rw.mjs read gpu /root/big.bin --out ./big.bin   # 二进制安全地下载到本机
  *   node rw.mjs edit gpu /root/a.py --old "lr=0.1" --new "lr=0.01"
  *   node rw.mjs write gpu /root/new.py --from ./local.py
  *   node rw.mjs exec gpu "nvidia-smi -L"
  *
  * 连接信息取自 servers.json 的对应条目(或 --host/--user/--port/--key 覆盖)。
  */
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { stdin } from 'node:process'
 import { connect } from './lib/sftp.mjs'
 import { findServer, resolveConn } from './lib/hosts.mjs'
@@ -49,6 +50,7 @@ function parseArgs(argv) {
     else if (a === '-i' || a === '--ignore-case') opts.ignoreCase = true
     else if (a === '--text') opts.text = argv[++i]
     else if (a === '--from') opts.from = argv[++i]
+    else if (a === '--out') opts.out = argv[++i]
     else if (a === '--old') opts.old = argv[++i]
     else if (a === '--new') opts.new = argv[++i]
     else if (a === '--pattern') opts.pattern = argv[++i]
@@ -134,6 +136,12 @@ async function cmdStat(conn, path) {
 
 async function cmdRead(conn, path, opts) {
   const target = normalizeRemotePath(path)
+  // --out:把内容原样写到本机文件(二进制安全)。
+  // ⚠️ 落盘时**不能**带上给终端看的那行 `[N 字节]` 脚注 —— 实测直接 `read > file`
+  // 重定向会被脚注污染,得到的 md5 与远程不一致。
+  const toFile = typeof opts.out === 'string' && opts.out.length > 0
+  if (toFile) writeFileSync(opts.out, Buffer.alloc(0)) // 先清空,避免追加到旧内容
+  const emit = (chunk) => { if (toFile) appendFileSync(opts.out, chunk); else process.stdout.write(chunk) }
   if (opts.head || opts.tail) {
     // 大文件用远程 head/tail,避免整文件传输
     const cmd = opts.head
@@ -141,12 +149,14 @@ async function cmdRead(conn, path, opts) {
       : `tail -n ${opts.tail} ${shq(target)}`
     const r = await conn.exec(cmd)
     if (r.code !== 0) die(r.stderr.trim() || `读取失败 (code ${r.code})`)
-    process.stdout.write(r.stdout)
+    emit(r.stdout)
+    if (toFile) { process.stderr.write(`✓ 已下载 ${target} → ${opts.out}(${Buffer.byteLength(r.stdout)} 字节)\n`); return }
     if (!r.stdout.endsWith('\n')) out()
     return
   }
   const buf = await conn.readFile(target)
-  process.stdout.write(buf)
+  emit(buf)
+  if (toFile) { process.stderr.write(`✓ 已下载 ${target} → ${opts.out}(${buf.length} 字节)\n`); return }
   if (buf.length && buf[buf.length - 1] !== 0x0a) out()
   out(`\n[${buf.length} 字节]`)
 }

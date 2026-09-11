@@ -736,6 +736,66 @@ const server = createServer(async (req, res) => {
       }
       return;
     }
+    // ── 下载:把远程文件以附件流回浏览器(二进制安全,浏览器自己落盘)──────
+    if (url.pathname === "/api/rw/download") {
+      const name = url.searchParams.get("name");
+      const remote = url.searchParams.get("path");
+      if (!name || !remote) return send(400, { error: "缺少 name / path" });
+      let conn;
+      try {
+        conn = await getFileConn(name);
+      } catch (e) {
+        return send(400, { error: `连接失败: ${e.message}` });
+      }
+      let st;
+      try {
+        st = await conn.stat(remote);
+        if (st.isDirectory?.()) return send(400, { error: "目录不能直接下载(先打包,或用 rw.mjs tree 看结构)" });
+      } catch (e) {
+        return send(404, { error: `文件不存在: ${e.message}` });
+      }
+      const base = remote.split("/").pop() || "download";
+      const ascii = base.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'");
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(st.size ?? 0),
+        "Content-Disposition": `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(base)}`,
+        "Cache-Control": "no-store",
+        ...cors,
+      });
+      const stream = conn.sftp.createReadStream(remote);
+      stream.on("error", () => { try { res.destroy(); } catch { /* 已断 */ } });
+      res.on("close", () => { try { stream.destroy(); } catch { /* 已结束 */ } });
+      stream.pipe(res);
+      return;
+    }
+    // ── 上传:请求体就是原始字节,直接管道进 SFTP(不走 JSON,不限大小)──
+    if (url.pathname === "/api/rw/upload" && req.method === "POST") {
+      const name = url.searchParams.get("name");
+      const dest = url.searchParams.get("path");
+      if (!name || !dest) return send(400, { error: "缺少 name / path" });
+      let conn;
+      try {
+        conn = await getFileConn(name);
+      } catch (e) {
+        return send(400, { error: `连接失败: ${e.message}` });
+      }
+      const parent = dest.includes("/") ? dest.slice(0, dest.lastIndexOf("/")) : ".";
+      try {
+        await conn.mkdirp(parent);
+      } catch (e) {
+        return send(400, { error: `建父目录失败: ${e.message}` });
+      }
+      let received = 0;
+      let done = false;
+      const sink = conn.sftp.createWriteStream(dest);
+      req.on("data", (chunk) => { received += chunk.length; });
+      sink.on("close", () => { if (!done) { done = true; send(200, { ok: true, path: dest, bytes: received }); } });
+      sink.on("error", (e) => { if (!done) { done = true; send(400, { error: `写入失败: ${e.message}` }); } });
+      req.on("error", (e) => { try { sink.destroy(); } catch { /* 已断 */ } if (!done) { done = true; send(400, { error: `接收失败: ${e.message}` }); } });
+      req.pipe(sink);
+      return;
+    }
     send(404, { error: "not found" });
   } catch (e) {
     send(500, { error: String(e?.message ?? e) });

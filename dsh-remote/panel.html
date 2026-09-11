@@ -68,6 +68,59 @@
   .steps .ok { color: #059669; }
   .steps .bad { color: #dc2626; }
 
+  /* ── 文件管理器 ── */
+  #fm { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 80; padding: 24px; }
+  #fm.open { display: flex; align-items: center; justify-content: center; }
+  .fm-box {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; width: min(1400px, 96vw); height: min(900px, 92vh);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .fm-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
+  .fm-head .fm-title { font-weight: 600; font-size: 14px; }
+  .fm-crumbs { display: flex; align-items: center; gap: 2px; flex: 1; flex-wrap: wrap; font-size: 12px; }
+  .fm-crumbs a { color: #2563eb; cursor: pointer; text-decoration: none; padding: 2px 4px; border-radius: 4px; }
+  .fm-crumbs a:hover { background: #eff6ff; }
+  .fm-crumbs span { color: #9ca3af; }
+  .fm-body { flex: 1; display: grid; grid-template-columns: minmax(260px, 34%) 1fr; min-height: 0; }
+  .fm-list { border-right: 1px solid #e5e7eb; overflow: auto; padding: 6px; }
+  .fm-list.dragover { outline: 2px dashed #2563eb; outline-offset: -4px; background: #f0f7ff; }
+  .fm-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .fm-row:hover { background: #f3f4f6; }
+  .fm-row.sel { background: #dbeafe; }
+  .fm-row .ico { width: 18px; text-align: center; }
+  .fm-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fm-row .mt { color: #9ca3af; font-size: 11px; white-space: nowrap; }
+  .fm-row .acts { display: none; gap: 4px; }
+  .fm-row:hover .acts { display: flex; }
+  .fm-row .acts button { padding: 2px 6px; font-size: 11px; border-radius: 5px; }
+  .fm-pane { overflow: auto; display: flex; flex-direction: column; min-height: 0; }
+  .fm-pane-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #e5e7eb; font-size: 12px; color: #6b7280; }
+  .fm-pane-head .sp { flex: 1; }
+  .fm-editor { flex: 1; border: none; resize: none; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px; line-height: 1.55; outline: none; white-space: pre; tab-size: 4; }
+  .fm-preview { flex: 1; overflow: auto; padding: 14px 18px; font-size: 14px; line-height: 1.7; }
+  .fm-preview pre { background: #f6f8fa; padding: 10px; border-radius: 6px; overflow: auto; font-size: 12px; }
+  .fm-preview img, .fm-pane img { max-width: 100%; }
+  .fm-empty { color: #9ca3af; text-align: center; padding: 40px 12px; font-size: 13px; }
+  .fm-nb-cell { border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+  .fm-nb-cell .tag { font-size: 11px; color: #6b7280; padding: 3px 10px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
+  .fm-nb-cell pre { margin: 0; border-radius: 0; }
+  .fm-nb-out { border-top: 1px dashed #e5e7eb; background: #fcfcfd; }
+  .fm-status { padding: 6px 14px; font-size: 12px; color: #6b7280; border-top: 1px solid #e5e7eb; min-height: 20px; }
+  .fm-err { color: #dc2626; }
+  @media (prefers-color-scheme: dark) {
+    .fm-box { background: #26282e; border-color: #3a3d45; }
+    .fm-head, .fm-list, .fm-pane-head, .fm-status { border-color: #3a3d45; }
+    .fm-row:hover { background: #32353c; }
+    .fm-row.sel { background: #1e3a5f; }
+    .fm-editor { background: #1b1d21; color: #e6e6e6; }
+    .fm-preview pre { background: #1b1d21; }
+    .fm-nb-cell { border-color: #3a3d45; }
+    .fm-nb-cell .tag { background: #1f2126; border-color: #3a3d45; }
+    .fm-nb-out { background: #1f2126; }
+    .fm-list.dragover { background: #1e3a5f; }
+  }
+
   /* modal */
   .modal {
     position: fixed; inset: 0; background: rgba(0,0,0,.4);
@@ -159,6 +212,29 @@
 
   <div id="toast"></div>
 
+  <!-- 文件管理器:一个机器一棵树,增删改查 + 拖拽上传 + 下载 + 按类型分派的编辑器 -->
+  <div id="fm">
+    <div class="fm-box">
+      <div class="fm-head">
+        <span class="fm-title" id="fmTitle">文件</span>
+        <span class="fm-crumbs" id="fmCrumbs"></span>
+        <button onclick="fmRefresh()">🔄 刷新</button>
+        <button onclick="fmNewFile()">📄 新建文件</button>
+        <button onclick="fmNewDir()">📁 新建文件夹</button>
+        <button class="primary" onclick="document.getElementById('fmUp').click()">⬆ 上传</button>
+        <button onclick="fmClose()">✕ 关闭</button>
+        <input type="file" id="fmUp" multiple style="display:none" onchange="fmUpload(this.files);this.value=''">
+      </div>
+      <div class="fm-body">
+        <div class="fm-list" id="fmList"></div>
+        <div class="fm-pane" id="fmPane">
+          <div class="fm-empty">← 选一个文件查看/编辑,或把文件拖到左边上传</div>
+        </div>
+      </div>
+      <div class="fm-status" id="fmStatus"></div>
+    </div>
+  </div>
+
   <!-- 新建远程工作台:一个分区,读/写/bash/搜索全部在远程执行,本机零拷贝 -->
   <div class="modal" id="wbModal">
     <div class="modal-box">
@@ -239,6 +315,7 @@ async function refresh() {
           <button class="primary" onclick="doConnect('${esc(s.name)}')">🔌 连接</button>
           <button onclick="doOpen('${esc(s.name)}')">🌐 打开窗口</button>
           <button onclick="doTest('${esc(s.name)}')">🧪 测试</button>
+          <button onclick="fmOpen('${esc(s.name)}')">📁 文件</button>
           <button onclick="doSetupKey('${esc(s.name)}')">🔑 部署密钥</button>
           <button onclick="doInitServer('${esc(s.name)}')">⚡ 初始化</button>
           <button onclick="doCopy('${esc(s.name)}')">📋 复制地址</button>
@@ -350,6 +427,381 @@ function openConfig() {
     window.open("file://" + m.configFile, "_blank");
   }).catch(() => toast("无法打开配置文件"));
 }
+
+/* ── 文件管理器:一棵树,增删改查 + 拖拽上传 + 下载 + 按类型分派的查看/编辑 ── */
+const FM = { machine: null, path: "/", entries: [], sel: null, original: "", current: null };
+const FM_IMG = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i;
+const FM_NB = /\.ipynb$/i;
+const FM_JSON = /\.(json|jsonl|geojson)$/i;
+const FM_MD = /\.(md|markdown)$/i;
+const FM_CSV = /\.(csv|tsv)$/i;
+
+function fmOpen(machine) {
+  FM.machine = machine; FM.path = "/"; FM.sel = null; FM.original = ""; FM.current = null;
+  document.getElementById("fmTitle").textContent = `文件 · ${machine}`;
+  document.getElementById("fm").classList.add("open");
+  document.getElementById("fmPane").innerHTML = '<div class="fm-empty">← 选一个文件查看/编辑,或把文件拖到左边上传</div>';
+  fmStatus("");
+  fmList();
+}
+function fmClose() {
+  if (FM.original && !confirm("有未保存的修改,确定关闭?")) return;
+  document.getElementById("fm").classList.remove("open");
+}
+function fmStatus(msg, cls = "") {
+  const el = document.getElementById("fmStatus");
+  el.className = `fm-status ${cls}`;
+  el.textContent = msg;
+}
+const fmJoin = (dir, name) => `${dir === "/" ? "" : dir.replace(/\/$/, "")}/${name}`;
+function fmParent(p) { const i = p.replace(/\/+$/, "").lastIndexOf("/"); return i <= 0 ? "/" : p.slice(0, i); }
+function fmtSize(n) {
+  if (n == null || n === 0) return n === 0 ? "0" : "";
+  const u = ["B", "K", "M", "G", "T"]; let i = 0; let v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i += 1 }
+  return `${i === 0 ? v : v.toFixed(1)}${u[i]}`;
+}
+function fmtTime(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function fmCrumbs() {
+  const parts = FM.path.split("/").filter(Boolean);
+  const el = document.getElementById("fmCrumbs");
+  el.innerHTML = `<a onclick="fmGo('/')">/</a>`;
+  let acc = "";
+  for (const p of parts) {
+    acc += `/${p}`;
+    const target = acc;
+    el.innerHTML += `<span>›</span><a onclick="fmGo('${esc(target)}')">${esc(p)}</a>`;
+  }
+}
+function fmGo(path) {
+  if (FM.original && !confirm("有未保存的修改,确定切换目录?")) return;
+  FM.original = ""; FM.path = path; FM.sel = null;
+  fmList();
+}
+async function fmList() {
+  const list = document.getElementById("fmList");
+  list.innerHTML = '<div class="fm-empty">读取中…</div>';
+  try {
+    const r = await api(`/api/rw/list?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(FM.path)}`);
+    FM.entries = r.entries || [];
+    FM.path = r.path || FM.path;
+    fmCrumbs();
+    list.innerHTML = "";
+    if (!FM.entries.length) list.innerHTML = '<div class="fm-empty">空目录 —— 把文件拖进来即可上传</div>';
+    for (const e of FM.entries) list.appendChild(fmRow(e));
+    fmStatus(`${FM.path} · ${FM.entries.length} 项`);
+  } catch (e) {
+    list.innerHTML = `<div class="fm-empty fm-err">${esc(e.message)}</div>`;
+  }
+}
+function fmRow(e) {
+  const row = document.createElement("div");
+  row.className = "fm-row";
+  row.dataset.name = e.name;
+  row.draggable = !e.dir;
+  row.innerHTML = `<span class="ico">${e.dir ? "📁" : FM_IMG.test(e.name) ? "🖼" : FM_NB.test(e.name) ? "📓" : "📄"}</span>`
+    + `<span class="nm">${esc(e.name)}</span>`
+    + `<span class="mt">${e.dir ? "" : fmtSize(e.size)} ${fmtTime(e.mtime)}</span>`
+    + `<span class="acts">`
+    + (e.dir ? "" : `<button onclick="event.stopPropagation();fmDownload('${esc(e.name)}')" title="下载">⬇</button>`)
+    + `<button onclick="event.stopPropagation();fmRename('${esc(e.name)}')" title="重命名">✏️</button>`
+    + `<button onclick="event.stopPropagation();fmDelete('${esc(e.name)}',${e.dir})" title="删除">🗑</button>`
+    + `</span>`;
+  row.onclick = () => (e.dir ? fmGo(fmJoin(FM.path, e.name)) : fmOpenFile(e.name));
+  if (e.dir) {
+    row.ondragover = (ev) => { ev.preventDefault(); row.classList.add("sel") };
+    row.ondragleave = () => row.classList.remove("sel");
+    row.ondrop = async (ev) => {
+      ev.preventDefault(); ev.stopPropagation(); row.classList.remove("sel");
+      const files = ev.dataTransfer.files;
+      if (files && files.length) return fmUploadTo(fmJoin(FM.path, e.name), files);
+      const from = ev.dataTransfer.getData("text/fm-move");
+      if (from) return fmMove(from, fmJoin(FM.path, e.name));
+    };
+  } else {
+    row.ondragstart = (ev) => ev.dataTransfer.setData("text/fm-move", fmJoin(FM.path, e.name));
+  }
+  return row;
+}
+async function fmOpenFile(name) {
+  if (FM.original && !confirm("有未保存的修改,确定打开别的文件?")) return;
+  FM.sel = name; FM.original = "";
+  for (const r of document.querySelectorAll(".fm-row")) r.classList.toggle("sel", r.dataset.name === name);
+  const path = fmJoin(FM.path, name);
+  FM.current = { name, path };
+  try {
+    if (FM_IMG.test(name)) return fmRenderImage(name, path);
+    const r = await api(`/api/rw/read?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(path)}`);
+    if (r.binary) return fmRenderBinary(name, path, r.size);
+    FM.original = r.text;
+    fmRender(name, path, r.text);
+  } catch (e) {
+    fmStatus(`打开失败: ${e.message}`, "fm-err");
+  }
+}
+function fmPaneHead(name, extra = "") {
+  return `<div class="fm-pane-head"><b>${esc(name)}</b><span class="sp"></span>${extra}`
+    + `<button onclick="fmDownload('${esc(name)}')">⬇ 下载</button><button class="primary" onclick="fmSave()">💾 保存 (⌘S)</button></div>`;
+}
+function fmRender(name, path, text) {
+  const pane = document.getElementById("fmPane");
+  const bytes = new Blob([text]).size;
+  if (FM_JSON.test(name)) {
+    pane.innerHTML = fmPaneHead(name, `<span id="fmJsonState"></span><button onclick="fmJsonFormat()">格式化</button>`)
+      + `<textarea class="fm-editor" id="fmText" spellcheck="false"></textarea>`;
+    document.getElementById("fmText").value = text;
+    fmJsonCheck();
+  } else if (FM_MD.test(name)) {
+    pane.innerHTML = `<div class="fm-pane-head"><b>${esc(name)}</b><span class="sp"></span>`
+      + `<button onclick="fmMdToggle()" id="fmMdBtn">预览</button>`
+      + `<button onclick="fmDownload('${esc(name)}')">⬇ 下载</button><button class="primary" onclick="fmSave()">💾 保存 (⌘S)</button></div>`
+      + `<textarea class="fm-editor" id="fmText" spellcheck="false"></textarea>`;
+    document.getElementById("fmText").value = text;
+  } else if (FM_NB.test(name)) {
+    fmRenderNotebook(name, path, text);
+  } else if (FM_CSV.test(name)) {
+    fmRenderTable(name, path, text);
+  } else {
+    pane.innerHTML = fmPaneHead(name, `<span>${fmtSize(bytes)}</span>`)
+      + `<textarea class="fm-editor" id="fmText" spellcheck="false"></textarea>`;
+    document.getElementById("fmText").value = text;
+    fmBindEditor();
+  }
+  fmStatus(`${path} · ${fmtSize(bytes)} · ${text.split("\n").length} 行`);
+}
+function fmBindEditor() {
+  const ta = document.getElementById("fmText");
+  if (!ta) return;
+  ta.oninput = () => {
+    const dirty = ta.value !== FM.original;
+    fmStatus(dirty ? "● 有未保存的修改(⌘S 保存)" : "已是最新", dirty ? "fm-warn" : "");
+  };
+  ta.onkeydown = (ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === "s") { ev.preventDefault(); fmSave() } };
+}
+async function fmSave() {
+  const ta = document.getElementById("fmText");
+  if (!ta || !FM.current) return;
+  try {
+    await api("/api/rw/write", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, path: FM.current.path, text: ta.value }) });
+    FM.original = ta.value;
+    if (FM_JSON.test(FM.current.name)) fmJsonCheck();
+    fmStatus(`✓ 已保存 ${FM.current.path}`, "");
+    fmList();
+  } catch (e) {
+    fmStatus(`保存失败: ${e.message}`, "fm-err");
+  }
+}
+function fmJsonCheck() {
+  const ta = document.getElementById("fmText");
+  const el = document.getElementById("fmJsonState");
+  if (!ta || !el) return;
+  try { JSON.parse(ta.value); el.textContent = "✓ JSON 合法"; el.className = "fm-status"; }
+  catch (e) { el.textContent = `✗ ${e.message}`; el.className = "fm-err"; }
+}
+function fmJsonFormat() {
+  const ta = document.getElementById("fmText");
+  try { ta.value = `${JSON.stringify(JSON.parse(ta.value), null, 2)}\n`; fmJsonCheck(); fmStatus("已格式化(未保存)", "fm-warn") }
+  catch (e) { fmStatus(`不是合法 JSON: ${e.message}`, "fm-err") }
+}
+function fmMdToggle() {
+  const ta = document.getElementById("fmText");
+  const btn = document.getElementById("fmMdBtn");
+  const prev = document.getElementById("fmMdPrev");
+  if (prev) {                                   // 从预览切回编辑
+    const box = document.createElement("textarea");
+    box.className = "fm-editor"; box.id = "fmText"; box.spellcheck = false; box.value = FM.mdCache ?? FM.original;
+    prev.replaceWith(box);
+    btn.textContent = "预览"; fmBindEditor();
+    return;
+  }
+  if (!ta) return;                              // 从「以源码编辑」进来时没有预览钮
+  FM.mdCache = ta.value;
+  const out = document.createElement("div");
+  out.className = "fm-preview"; out.id = "fmMdPrev";
+  out.innerHTML = fmMdToHtml(ta.value);
+  ta.replaceWith(out);
+  if (btn) { btn.textContent = "编辑"; }
+}
+function fmMdToHtml(src) {
+  let s = esc(src);
+  const blocks = [];
+  s = s.replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, (_, c) => { blocks.push(c); return `\u0000${blocks.length - 1}\u0000` });
+  s = s.replace(/^###### (.*)$/gm, "<h6>$1</h6>").replace(/^##### (.*)$/gm, "<h5>$1</h5>")
+    .replace(/^#### (.*)$/gm, "<h4>$1</h4>").replace(/^### (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.*)$/gm, "<h2>$1</h2>").replace(/^# (.*)$/gm, "<h1>$1</h1>");
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/^(?:- |\* )(.*)$/gm, "<li>$1</li>");
+  s = s.replace(/(?:<li>[\s\S]*?<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
+  s = s.split(/\n{2,}/).map((p) => (/^\s*<(h\d|ul|pre)/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`)).join("");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<pre>${blocks[+i].replace(/^\n/, "")}</pre>`);
+}
+function fmRenderNotebook(name, path, text) {
+  const pane = document.getElementById("fmPane");
+  let nb;
+  try { nb = JSON.parse(text) } catch (e) {
+    fmStatus(`notebook 解析失败(${e.message}),已按文本打开`, "fm-err");
+    pane.innerHTML = fmPaneHead(name, "") + `<textarea class="fm-editor" id="fmText"></textarea>`;
+    document.getElementById("fmText").value = text; FM.original = text; fmBindEditor(); return;
+  }
+  const cells = (nb.cells || []).map((c, i) => {
+    const raw = Array.isArray(c.source) ? c.source.join("") : String(c.source ?? "");
+    const isMd = c.cell_type === "markdown";
+    const body = isMd ? `<div class="fm-preview">${fmMdToHtml(raw)}</div>` : `<pre>${esc(raw)}</pre>`;
+    const outs = (c.outputs || []).map((o) => {
+      const data = o.data || {};
+      const pick = (k) => { const v = data[k]; if (v == null) return null; return Array.isArray(v) ? v.join("") : String(v) };
+      const img = pick("image/png") || pick("image/jpeg");
+      const txt = o.text ? (Array.isArray(o.text) ? o.text.join("") : String(o.text)) : pick("text/plain");
+      const html = pick("text/html");
+      if (img) return `<div class="fm-nb-out"><img src="data:image/png;base64,${img}"></div>`;
+      if (txt && txt.trim()) return `<div class="fm-nb-out"><pre>${esc(txt)}</pre></div>`;
+      if (html) return `<div class="fm-nb-out"><pre>${esc(html.slice(0, 3000))}</pre></div>`;
+      return "";
+    }).join("");
+    const label = isMd ? "markdown" : c.cell_type === "code" ? "code" : esc(c.cell_type);
+    return `<div class="fm-nb-cell"><div class="tag">${label} #${i + 1}</div>${body}${outs}</div>`;
+  }).join("");
+  pane.innerHTML = `<div class="fm-pane-head"><b>${esc(name)}</b><span>${(nb.cells || []).length} cells · nbformat ${nb.nbformat ?? "?"}.${nb.nbformat_minor ?? "?"}</span>`
+    + `<span class="sp"></span><button onclick="fmEditRaw()">以源码编辑</button>`
+    + `<button onclick="fmDownload('${esc(name)}')">⬇ 下载</button></div>`
+    + `<div class="fm-preview">${cells || '<div class="fm-empty">没有 cell</div>'}</div>`;
+  FM.original = text;
+}
+function fmEditRaw() {
+  const pane = document.getElementById("fmPane");
+  const text = FM.original;
+  pane.innerHTML = fmPaneHead(FM.current.name, `<button onclick="fmRenderNotebook('${esc(FM.current.name)}','${esc(FM.current.path)}',FM.original)">回到 notebook 视图</button>`)
+    + `<textarea class="fm-editor" id="fmText" spellcheck="false"></textarea>`;
+  document.getElementById("fmText").value = text;
+  fmBindEditor();
+}
+function fmRenderTable(name, path, text) {
+  const rows = text.split(/\r?\n/).filter((l) => l.length).slice(0, 500);
+  const sep = FM_CSV.test(name) && /\.tsv$/i.test(name) ? "\t" : ",";
+  const head = (rows[0] || "").split(sep);
+  const body = rows.slice(1).map((r) => r.split(sep));
+  const pane = document.getElementById("fmPane");
+  pane.innerHTML = fmPaneHead(name, `<button onclick="fmEditRaw()">以源码编辑</button>`)
+    + `<div class="fm-preview"><table style="border-collapse:collapse;font-size:12px">`
+    + `<tr>${head.map((h) => `<th style="border:1px solid #ddd;padding:3px 6px;background:#f6f8fa">${esc(h)}</th>`).join("")}</tr>`
+    + body.map((r) => `<tr>${r.map((c) => `<td style="border:1px solid #ddd;padding:3px 6px">${esc(c)}</td>`).join("")}</tr>`).join("")
+    + `</table>${rows.length >= 500 ? '<div class="muted">只显示前 500 行</div>' : ""}</div>`;
+  FM.original = text;
+}
+function fmRenderImage(name, path) {
+  const url = `/api/rw/download?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(path)}`;
+  document.getElementById("fmPane").innerHTML = fmPaneHead(name, `<span class="muted">图片</span>`)
+    + `<div class="fm-preview"><img src="${url}" alt="${esc(name)}"></div>`;
+  FM.original = "";
+}
+function fmRenderBinary(name, path, size) {
+  document.getElementById("fmPane").innerHTML = fmPaneHead(name, `<span class="muted">二进制 · ${fmtSize(size)}</span>`)
+    + `<div class="fm-empty">二进制文件不在此预览,点右上角下载</div>`;
+  FM.original = "";
+}
+function fmDownload(name) {
+  const path = name ? fmJoin(FM.path, name) : FM.current?.path;
+  if (!path) return;
+  const a = document.createElement("a");
+  a.href = `/api/rw/download?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(path)}`;
+  a.download = name || "";
+  document.body.appendChild(a); a.click(); a.remove();
+  fmStatus(`⬇ 开始下载 ${path}`, "");
+}
+async function fmUpload(files, dir) {
+  return fmUploadTo(dir || FM.path, files);
+}
+async function fmUploadTo(dir, files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  for (const f of list) {
+    const dest = fmJoin(dir, f.name);
+    fmStatus(`⬆ 上传 ${f.name}(${fmtSize(f.size)})…`);
+    try {
+      const r = await fetch(`/api/rw/upload?name=${encodeURIComponent(FM.machine)}&path=${encodeURIComponent(dest)}`, { method: "POST", body: f });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      fmStatus(`✓ 已上传 ${dest}(${fmtSize(j.bytes)})`, "");
+    } catch (e) {
+      fmStatus(`✗ ${f.name} 上传失败: ${e.message}`, "fm-err");
+      return;
+    }
+  }
+  fmList();
+}
+async function fmMove(from, toDir) {
+  const to = fmJoin(toDir, from.split("/").pop());
+  if (from === to) return;
+  try {
+    await api("/api/rw/mv", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, from, to }) });
+    fmStatus(`✓ 已移动到 ${to}`, "");
+    fmList();
+  } catch (e) { fmStatus(`移动失败: ${e.message}`, "fm-err") }
+}
+async function fmNewFile() {
+  const name = prompt("新建文件名(在当前目录)");
+  if (!name) return;
+  try {
+    await api("/api/rw/write", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name), text: "" }) });
+    await fmList(); await fmOpenFile(name);
+  } catch (e) { fmStatus(`新建失败: ${e.message}`, "fm-err") }
+}
+async function fmNewDir() {
+  const name = prompt("新建文件夹名");
+  if (!name) return;
+  try {
+    await api("/api/rw/mkdir", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name) }) });
+    fmList();
+  } catch (e) { fmStatus(`新建失败: ${e.message}`, "fm-err") }
+}
+async function fmRename(name) {
+  const to = prompt(`重命名 ${name} →`, name);
+  if (!to || to === name) return;
+  try {
+    await api("/api/rw/mv", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, from: fmJoin(FM.path, name), to: fmJoin(FM.path, to) }) });
+    fmStatus(`✓ 已重命名为 ${to}`, ""); fmList();
+  } catch (e) { fmStatus(`重命名失败: ${e.message}`, "fm-err") }
+}
+async function fmDelete(name, dir) {
+  if (!confirm(`删除 ${name}${dir ? "(目录,递归)" : ""}?`)) return;
+  try {
+    await api("/api/rw/rm", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: FM.machine, path: fmJoin(FM.path, name), recursive: dir }) });
+    fmStatus(`✓ 已删除 ${name}`, "");
+    if (FM.current && FM.current.name === name) { FM.original = ""; FM.current = null; document.getElementById("fmPane").innerHTML = '<div class="fm-empty">已删除</div>' }
+    fmList();
+  } catch (e) { fmStatus(`删除失败: ${e.message}`, "fm-err") }
+}
+function fmRefresh() { fmStatus(""); fmList() }
+
+// 拖拽上传:整个列表面板都是投放区(拖到目录行上则传进那个目录)
+(function fmBindDrop() {
+  const list = document.getElementById("fmList");
+  if (!list) return;
+  list.addEventListener("dragover", (e) => { e.preventDefault(); list.classList.add("dragover") });
+  list.addEventListener("dragleave", () => list.classList.remove("dragover"));
+  list.addEventListener("drop", (e) => {
+    e.preventDefault(); list.classList.remove("dragover");
+    if (e.dataTransfer.files && e.dataTransfer.files.length) fmUpload(e.dataTransfer.files);
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s" && document.getElementById("fm").classList.contains("open")) {
+      e.preventDefault(); fmSave();
+    }
+    if (e.key === "Escape" && document.getElementById("fm").classList.contains("open")) fmClose();
+  });
+})();
+
 
 /* ── 新建远程工作台 ── */
 async function openWorkbench() {
