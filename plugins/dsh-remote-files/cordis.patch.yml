@@ -1,0 +1,6 @@
+# dsh-remote-files 的 bundle 层:把客户端插件挂进 profile。
+#
+# 注意新增条目必须用 `insert`(直接写 `- id: x` 是"修改已存在条目",不存在只会警告)。
+- insert:
+    - id: dsh-remote-files
+      name: 'dsh-remote-files'
