@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
-import { readWorkbenchRoots, machineRoots, fencePath, describeScope } from "./lib/scope.mjs";
+import { readWorkbenchRoots, machineRoots, fencePath, describeScope, toRemoteUnder } from "./lib/scope.mjs";
 import { createWorkbench, planWorkbench, rollbackWorkbench, pickFreePort } from "./workbench.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -677,6 +677,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/rw/whoami") {
       const port = Number(url.searchParams.get("port") || 0);
       const name = url.searchParams.get("name");
+      const cwd = url.searchParams.get("cwd");   // 本会话工作区(本机路径,客户端从 sessions store 拿的)
       const all = machinesWithConn();
       const scope = resolveScope({ port, name });
       let machine = null;
@@ -684,14 +685,22 @@ const server = createServer(async (req, res) => {
         const hit = loadServers().find((s) => s.name === scope.name);
         try {
           const c = resolveConn(hit, {});
+          // 聚焦:把 cwd 映射成远程拼写,**并对着允许范围校验一次** ——
+          // 所以它只决定「显示哪个根」,改不了能访问到哪。
+          let focus = null;
+          if (cwd && scope.kind === "workspace") {
+            const mapped = toRemoteUnder(scope.name, cwd);
+            if (mapped && scope.roots.includes(mapped)) focus = mapped;
+          }
           machine = {
             name: hit.name, label: hit.label || hit.name,
             host: c.host, port: c.port, user: c.user,
             scope: scope.kind,                 // "workspace" = 只能碰本工作台登记的工作区
-            roots: scope.roots,                // 允许的根(远程拼写)
+            roots: scope.roots,                // 允许的根(远程拼写);围栏用的就是它
+            focus,                             // 本会话所在的那个根(侧栏只显示这一个)
             titles: scope.titles || {},        // 工作区标题,给树当节点名
             note: scope.note,
-            defaultPath: scope.roots[0] || null,
+            defaultPath: focus || scope.roots[0] || null,
           };
         } catch { /* 无连接信息则视为未匹配 */ }
       }
