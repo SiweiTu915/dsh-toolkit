@@ -99,6 +99,22 @@ export function machineRoots(server) {
   return [normalizeRemotePath(dp || '/root')]
 }
 
+/**
+ * 把一个**本机**路径按该工作台的挂载映射成远程拼写。
+ * 不在挂载点之下(或没有挂载配置)返回 null。
+ *
+ * 用途:客户端从 sessions store 拿到本会话的工作区(本机路径),报给面板换成远程拼写,
+ * 好让侧栏聚焦到**当前这一个**工作区。注意这只是「聚焦哪个根」,不是放宽范围 ——
+ * 调用方仍须把结果对着允许的 roots 校验一次。
+ */
+export function toRemoteUnder(name, localPath) {
+  const mount = readMount(name)
+  if (!mount || !mount.localRoot) return null
+  const rel = relPathUnder(mount.localRoot, localPath)
+  if (rel === null) return null
+  return toRemotePath(mount.remoteRoot, rel)
+}
+
 /** target 是否在任一 root 之下(纯字符串判定,已归一化)。 */
 export function withinRoots(roots, target) {
   const t = normalizeRemotePath(target)

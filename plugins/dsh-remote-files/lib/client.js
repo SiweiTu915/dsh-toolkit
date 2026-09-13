@@ -32,7 +32,11 @@ window.__ModuleLoader__.load({
 		const WS_PORT = Number(location.port || 80);
 		const SCOPE = `port=${WS_PORT}`;
 		const TAB_ID = "dsh-remote-files";
-		const TAB_KIND = "dsh-remote-files";
+		// 注册表**按 kind 分槽**,每个 kind 只留一个(extension 3 > builtin 2 > fallback 1),
+		// 同 kind 不同档会 shadow,不同 kind 则各占一槽、同时出现 —— 这正是"一个工作区里
+		// 并排两棵文件树"的原因。所以这里用官方文件树的 kind("files"),以 extension 档
+		// 接管它:每个工作区只有一个文件面板(这个可写的);停用本插件,官方那棵自动恢复。
+		const TAB_KIND = "files";
 
 		/* ------------------------------------------------------------------ 样式 --- */
 		const CSS = `
@@ -129,9 +133,28 @@ window.__ModuleLoader__.load({
 		/* ---------------------------------------------------------------- 组件 --- */
 		function Icon({ children }) { return h("span", { className: "ico" }, children) }
 
-		function Pane() {
-			const [machine, setMachine] = react.useState(null);   // whoami 的 machine:{name,label,scope,roots,titles,note}
-			const [roots, setRoots] = react.useState([]);         // 允许访问的根(服务端按端口算出,最窄 = 本工作台的工作区)
+		/* 侧栏是**跟着会话的工作区**走的:根既不是「这台机器」也不是「这个工作台的全部工作区」,
+		   而是本会话自己的那个工作区 —— 和官方侧栏文件树同一个来源(sessions store 里的 cwd)。
+		   拆三层是为了 hooks 规则:cwd 只能由 hook 拿,而 useSessions 在挂载时就定了有没有,
+		   所以「有没有它」交给两个不同组件分派,各自内部无条件调 hook。 */
+		function PaneWithCwd(props) {
+			const cwd = props.useSessions((state) => {
+				const w = state && state.byId ? state.byId[props.sessionId] : null;
+				return w ? w.cwd : undefined;
+			});
+			return h(PaneBody, Object.assign({}, props, { cwd }));
+		}
+		function Pane(props) {
+			return typeof props.useSessions === "function"
+				? h(PaneWithCwd, props)
+				: h(PaneBody, Object.assign({}, props, { cwd: undefined }));
+		}
+
+		function PaneBody(props) {
+			const cwd = props.cwd;                                // 本会话的工作区(本机路径)
+			const [machine, setMachine] = react.useState(null);   // whoami 的 machine:{name,label,scope,roots,focus,titles,note}
+			const [roots, setRoots] = react.useState([]);         // 服务端允许的根(围栏用;最窄 = 本工作台的工作区)
+			const [home, setHome] = react.useState("");           // 本会话对应的那一个根 —— 树只显示它
 			const [titles, setTitles] = react.useState({});
 			const [err, setErr] = react.useState("");
 			const [msg, setMsg] = react.useState("");
@@ -147,8 +170,10 @@ window.__ModuleLoader__.load({
 			const dragRef = react.useRef(null);
 
 			react.useEffect(() => {
+				if (!cwd) return;                     // 本会话的工作区还没解析出来(或这个会话没有)
 				let alive = true;
-				api(`/api/rw/whoami?port=${WS_PORT}`)
+				setErr(""); setKids({}); setOpen({}); setSel(null); setFile(null); setHome("");
+				api(`/api/rw/whoami?port=${WS_PORT}&${qs({ cwd })}`)
 					.then((r) => {
 						if (!alive) return;
 						if (!r.machine) { setErr(r.error || "这个端口没有对应的机器(先在 dsh-remote 面板里登记)"); return }
@@ -156,14 +181,17 @@ window.__ModuleLoader__.load({
 						const rs = r.machine.roots || [];
 						setRoots(rs);
 						setTitles(r.machine.titles || {});
-						if (!rs.length) { setErr(r.machine.note || "这个工作台还没登记工作区,没有可访问的范围"); return }
-						setDir(rs[0]);
-						setOpen({ [rs[0]]: true });
-						return load(rs[0]);
+						// focus = 本会话的工作区映射到远程后的路径(服务端已校验它落在 roots 之内)
+						const start = r.machine.focus || rs[0];
+						if (!start) { setErr(r.machine.note || "这个工作台还没登记工作区,没有可访问的范围"); return }
+						setHome(start);
+						setDir(start);
+						setOpen({ [start]: true });
+						return load(start);
 					})
 					.catch((e) => alive && setErr(`连不上面板 ${panelBase()}:${e.message}`));
 				return () => { alive = false };
-			}, []);
+			}, [cwd]);
 
 			async function load(path) {
 				const j = await api(`/api/rw/list?${SCOPE}&${qs({ path })}`);
@@ -370,8 +398,8 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			// 面包屑从**所在范围根**起算 —— 根之上没有可达路径,所以不显示"/"
-			const homeRoot = roots.filter((r) => dir === r || dir.startsWith(`${r}/`)).sort((a, b) => b.length - a.length)[0] || roots[0] || "";
+			// 面包屑从**本会话那个工作区**起算 —— 根之上没有可达路径,所以不显示"/"
+			const homeRoot = home || "";
 			const crumbs = (() => {
 				if (!homeRoot) return [];
 				const rel = dir === homeRoot ? "" : dir.slice(homeRoot.length + 1);
@@ -386,6 +414,8 @@ window.__ModuleLoader__.load({
 				return out;
 			})();
 			const scoped = machine && machine.scope === "workspace";
+			// cwd 一直没来 = 这个会话没有工作区(官方侧栏也是这么判的)
+			const noWs = !cwd && !machine;
 
 			return h("div", { className: "drf" },
 				h("div", { className: "drf-head" },
@@ -393,16 +423,16 @@ window.__ModuleLoader__.load({
 					machine ? h("span", {
 						className: "drf-scope",
 						title: scoped
-							? `只能访问本工作台登记的工作区:\n${roots.join("\n")}`
+							? `本会话的工作区:\n${homeRoot}\n\n(这个工作台共登记 ${roots.length} 个工作区,侧栏只显示当前这个)`
 							: `只能访问该机器的挂载根:\n${roots.join("\n")}`,
-					}, scoped ? `🔒 仅工作区 ×${roots.length}` : "🔓 挂载根") : null,
+					}, scoped ? "🔒 仅工作区" : "🔓 挂载根") : null,
 					h("span", { className: "drf-crumb" }, crumbs),
 				),
 				h("div", { className: "drf-bar" },
-					h("button", { className: "drf-btn", onClick: () => { setKids({}); roots.forEach((r) => load(r).catch(() => null)) } }, "🔄 刷新"),
-					h("button", { className: "drf-btn", disabled: !roots.length, onClick: newFile }, "📄 新建文件"),
-					h("button", { className: "drf-btn", disabled: !roots.length, onClick: newDir }, "📁 新建文件夹"),
-					h("button", { className: "drf-btn", "data-primary": true, disabled: !roots.length, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
+					h("button", { className: "drf-btn", onClick: () => { setKids({}); if (homeRoot) load(homeRoot).catch(() => null) } }, "🔄 刷新"),
+					h("button", { className: "drf-btn", disabled: !homeRoot, onClick: newFile }, "📄 新建文件"),
+					h("button", { className: "drf-btn", disabled: !homeRoot, onClick: newDir }, "📁 新建文件夹"),
+					h("button", { className: "drf-btn", "data-primary": true, disabled: !homeRoot, onClick: () => upRef.current && upRef.current.click() }, "⬆ 上传"),
 					h("input", { ref: upRef, type: "file", multiple: true, style: { display: "none" }, onChange: (e) => { uploadTo(dir, e.target.files); e.target.value = "" } }),
 				),
 				h("div", {
@@ -410,11 +440,13 @@ window.__ModuleLoader__.load({
 					onDragOver: (e) => { e.preventDefault(); dragRef.current = true; e.currentTarget.classList.add("drag") },
 					onDragLeave: (e) => { e.currentTarget.classList.remove("drag") },
 					onDrop: (e) => { e.preventDefault(); e.currentTarget.classList.remove("drag"); if (e.dataTransfer.files && e.dataTransfer.files.length) uploadTo(dir, e.dataTransfer.files) },
-				}, machine
-					? (roots.length
-						? roots.map((r) => node({ path: r, name: r, dir: true, size: 0 }, "", 0, true))
-						: h("div", { className: "drf-empty" }, err || "这个工作台没有可访问的工作区"))
-					: h("div", { className: "drf-empty" }, err || "正在解析这台工作台的机器…")),
+				}, noWs
+					? h("div", { className: "drf-empty" }, "这个会话没有工作区目录 —— 先在 DSH 里把一个目录加为工作区")
+					: machine
+						? (homeRoot
+							? node({ path: homeRoot, name: homeRoot, dir: true, size: 0 }, "", 0, true)
+							: h("div", { className: "drf-empty" }, err || "这个工作台没有可访问的工作区"))
+						: h("div", { className: "drf-empty" }, err || "正在解析本会话的工作区…")),
 				h("div", { className: "drf-editor" }, editor()),
 				h("div", { className: `drf-msg ${msg && msg.cls ? msg.cls : ""}` }, err ? h("span", { className: "drf-err" }, err) : (msg ? msg.text : "")),
 			);
@@ -428,10 +460,10 @@ window.__ModuleLoader__.load({
 				id: TAB_ID,
 				kind: TAB_KIND,
 				priority: "extension",
-				title: () => "文件(仅工作区)",
+				title: () => "文件(可写)",
 				guide: [{
 					order: 30,
-					title: () => "远程文件(仅工作区)",
+					title: () => "文件(可写 · 本工作区)",
 					description: () => "浏览 / 编辑 / 上传 / 下载 —— 只能碰本工作台登记的工作区",
 				}],
 			});
