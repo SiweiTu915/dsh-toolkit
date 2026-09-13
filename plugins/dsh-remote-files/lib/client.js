@@ -32,11 +32,11 @@ window.__ModuleLoader__.load({
 		const WS_PORT = Number(location.port || 80);
 		const SCOPE = `port=${WS_PORT}`;
 		const TAB_ID = "dsh-remote-files";
-		// 注册表**按 kind 分槽**,每个 kind 只留一个(extension 3 > builtin 2 > fallback 1),
-		// 同 kind 不同档会 shadow,不同 kind 则各占一槽、同时出现 —— 这正是"一个工作区里
-		// 并排两棵文件树"的原因。所以这里用官方文件树的 kind("files"),以 extension 档
-		// 接管它:每个工作区只有一个文件面板(这个可写的);停用本插件,官方那棵自动恢复。
-		const TAB_KIND = "files";
+		// kind 用自己的 —— **不接管官方那棵只读树**(kind `files`),它保持生效。
+		// 注册表按 kind 分槽:不同 kind 一定并存(`priority` 管不了并存与否,它只在
+		// **同一个** kind 内部决定谁 shadow 谁);所以「官方那棵不要出现」的唯一办法
+		// 是本插件不注册标签,而不是调 priority。
+		const TAB_KIND = "dsh-remote-files";
 
 		/* ------------------------------------------------------------------ 样式 --- */
 		const CSS = `
@@ -460,10 +460,10 @@ window.__ModuleLoader__.load({
 				id: TAB_ID,
 				kind: TAB_KIND,
 				priority: "extension",
-				title: () => "文件(可写)",
+				title: () => "远程文件(可写)",
 				guide: [{
 					order: 30,
-					title: () => "文件(可写 · 本工作区)",
+					title: () => "远程文件(可写 · 本工作区)",
 					description: () => "浏览 / 编辑 / 上传 / 下载 —— 只能碰本工作台登记的工作区",
 				}],
 			});
