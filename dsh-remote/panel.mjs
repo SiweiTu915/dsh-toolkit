@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
 import { readWorkbenchRoots, machineRoots, fencePath, describeScope, toRemoteUnder } from "./lib/scope.mjs";
+import { readEndpoint, planRepoint, applyRepoint } from "./lib/repoint.mjs";
 import { createWorkbench, planWorkbench, rollbackWorkbench, pickFreePort } from "./workbench.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -399,6 +400,50 @@ async function testServer(s) {
   return { name: s.name, checks };
 }
 
+/**
+ * 换完端点后验「两条接缝的连接路径」——不必等一次 agent 回合。
+ *
+ * fs 那条:面板的 SFTP 连接与 fs provider 读**同一份** servers.json、走**同一个**
+ *   lib/sftp.mjs,所以拿它 stat/readdir 一个挂载根就等于验了 fs provider 那条路。
+ * subprocess 那条:provider 是拿 sshTarget + sshExtraArgs 原样拼 ssh 调用,
+ *   这里就按它一模一样的参数拼一次(多带 BatchMode 免卡在密码提示)。
+ */
+async function verifyEndpoint(name) {
+  const out = { name, fs: null, subprocess: null };
+  const ep = (() => { try { return readEndpoint(name, ROOT); } catch { return null } })();
+  const mount = ep?.mounts?.find((m) => m.sshTarget) ?? null;
+
+  // ① fs 层
+  try {
+    const conn = await getFileConn(name);
+    const root = mount?.remoteRoot ?? "/";
+    const entries = await conn.readdir(root);
+    out.fs = { ok: true, via: `servers.json → lib/sftp.mjs(SFTP)`, root, entries: entries.length,
+      sample: entries.slice(0, 3).map((e) => e.filename) };
+  } catch (e) {
+    out.fs = { ok: false, via: "servers.json → lib/sftp.mjs(SFTP)", error: String(e?.message ?? e) };
+  }
+
+  // ② subprocess 层
+  if (!mount) {
+    out.subprocess = { ok: false, error: "没有挂载配置引用这台机器(subprocess provider 取不到 sshTarget)" };
+  } else {
+    const args = [...(mount.sshExtraArgs ?? []), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+      mount.sshTarget, "hostname; uname -r"];
+    const r = spawnSync("ssh", args, { encoding: "utf8", timeout: 30000 });
+    out.subprocess = {
+      ok: r.status === 0,
+      via: "sshTarget + sshExtraArgs(原样拼 ssh)",
+      target: mount.sshTarget,
+      args: mount.sshExtraArgs ?? [],
+      stdout: (r.stdout ?? "").trim(),
+      error: r.status === 0 ? null : ((r.stderr ?? "").trim() || `ssh 退出码 ${r.status}`),
+    };
+  }
+  out.ok = Boolean(out.fs?.ok && out.subprocess?.ok);
+  return out;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PANEL_PORT}`);
   // 允许本机工作台(3080/3090 等)的页面直接调用本面板的 /api/rw/*(仅监听回环,风险可控)
@@ -425,6 +470,11 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/servers" && req.method === "GET") {
       const servers = loadServers();
       const withStatus = await Promise.all(servers.map(serverStatus));
+      // 顺带把「当前端点」带给页面 —— 否则 direct 分区的卡片只会写「本地实例 :3090」,
+      // 真实远程端点(conn)根本不露出来,每次换端口都得去翻配置文件。
+      for (const s of withStatus) {
+        try { s.endpoint = readEndpoint(s.name, ROOT); } catch { s.endpoint = null; }
+      }
       send(200, { servers: withStatus });
       return;
     }
@@ -452,6 +502,55 @@ const server = createServer(async (req, res) => {
       send(200, { ok: true, server: await serverStatus(value) });
       return;
     }
+    // ── 换端点:看当前端点 / 一键改三处 / 改完验两条接缝 ────────────────────
+    // 逻辑与 repoint.mjs 共用 lib/repoint.mjs,所以「面板上点的」和「命令行跑的」
+    // 必然一致。面板进程不受会话沙箱限制,所以第三步(~/.ssh/config)在这里能一次做完。
+    if (url.pathname === "/api/endpoint" && req.method === "GET") {
+      const name = url.searchParams.get("name");
+      if (!name) return send(400, { error: "缺少 name" });
+      const ep = readEndpoint(name, ROOT);
+      if (!ep.conn) return send(404, { error: `servers.json 里没有机器 "${name}" 的可写 conn` });
+      send(200, { endpoint: ep });
+      return;
+    }
+    if (url.pathname === "/api/endpoint" && req.method === "POST") {
+      const body = await readBody(req);
+      if (!body?.name) return send(400, { error: "缺少 name" });
+      const port = Number(body.port);
+      const plan = planRepoint({ name: body.name, host: body.host, port, user: body.user, remoteDir: ROOT });
+      if (!plan.ok) return send(400, { error: plan.error });
+      if (body.dryRun) return send(200, { ok: true, dryRun: true, plan, applied: [], skipped: [], backups: [] });
+
+      const r = applyRepoint({
+        name: body.name, host: String(body.host), port, user: body.user,
+        sshConfig: Boolean(body.sshConfig), remoteDir: ROOT,
+      });
+      if (!r.ok) return send(400, { error: r.error });
+
+      let restarted = null;
+      if (body.restart) {
+        const s = loadServers().find((x) => x.name === body.name);
+        if (s) {
+          await stopTunnel(s.name);
+          const started = s.direct ? await startDirect(s) : await startTunnel(s);
+          const p = s.localPort ?? s.dshPort;
+          const ready = await waitForPort(p, 60000);
+          restarted = { ready, msg: started?.msg, port: p, server: await serverStatus(s) };
+        } else {
+          restarted = { ready: false, msg: "机器不在清单里,未重启" };
+        }
+      }
+      const verify = body.verify === false ? null : await verifyEndpoint(body.name);
+      send(200, { ok: true, applied: r.applied, skipped: r.skipped, backups: r.backups, stamp: r.stamp, plan, restarted, verify });
+      return;
+    }
+    if (url.pathname === "/api/endpoint/verify" && req.method === "GET") {
+      const name = url.searchParams.get("name");
+      if (!name) return send(400, { error: "缺少 name" });
+      send(200, await verifyEndpoint(name));
+      return;
+    }
+
     if (url.pathname === "/api/connect") {
       const name = url.searchParams.get("name");
       const servers = loadServers();

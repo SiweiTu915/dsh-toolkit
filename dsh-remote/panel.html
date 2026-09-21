@@ -149,6 +149,17 @@
   .test-result { font-size: 12px; margin-top: 6px; line-height: 1.6; }
   .test-result .ok { color: #059669; }
   .test-result .bad { color: #ef4444; }
+  /* 当前端点:direct 分区以前只写「本地实例 :3090」,真实远程端点根本不露出来 */
+  .ep { margin-top: 2px; }
+  .ep .ep-ok { color: #059669; }
+  .ep .ep-bad { color: #ef4444; cursor: help; }
+  .ep-out {
+    margin: 12px 0 0; padding: 10px; max-height: 240px; overflow: auto;
+    background: #1b1d21; border: 1px solid #3a3d45; border-radius: 8px;
+    font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+  }
+  .ep-current { font-size: 12px; line-height: 1.7; margin-bottom: 12px; color: #9ca3af; }
+  .ep-current code { color: #e6e6e6; }
 </style>
 </head>
 <body>
@@ -209,6 +220,32 @@
         <button onclick="closeModal()">取消</button>
         <button class="primary" onclick="saveModal()">保存</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 换端点:一次改全三处(servers.json / 挂载配置 / ~/.ssh/config),改完可直接验通并重启 -->
+  <div class="modal" id="epModal">
+    <div class="modal-box">
+      <h3 id="epTitle">换端点</h3>
+      <div class="modal-err" id="epErr"></div>
+      <div class="ep-current" id="epCurrent"></div>
+      <div class="form-row">
+        <div class="field"><label>新 host</label><input id="ep-host" placeholder="你的服务器IP或域名"></div>
+        <div class="field"><label>新 SSH 端口</label><input id="ep-port" type="number" placeholder="22"></div>
+        <div class="field"><label>用户</label><input id="ep-user" placeholder="root"></div>
+      </div>
+      <div class="form-row">
+        <div class="field check"><input type="checkbox" id="ep-sshconfig" checked><span>同时改 ~/.ssh/config 的别名(手动 ssh 也跟着走)</span></div>
+      </div>
+      <div class="form-row">
+        <div class="field check"><input type="checkbox" id="ep-restart" checked><span>改完重启这个分区(重新读取配置)</span></div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="epClose()">取消</button>
+        <button onclick="epPreview()">预览改动(dry-run)</button>
+        <button class="primary" onclick="epApply()">应用</button>
+      </div>
+      <pre class="ep-out" id="epOut" style="display:none"></pre>
     </div>
   </div>
 
@@ -293,6 +330,125 @@ function modeBadge(s) {
   return s.direct ? '<span class="badge direct">direct</span>' : '<span class="badge ssh">ssh</span>';
 }
 
+/* ── 当前端点 / 换端点 ──────────────────────────────────────────────────
+ * 端点散在三处(servers.json 的 conn / 各分区挂载配置 / ~/.ssh/config 别名)。
+ * 卡片上直接显示「当前端点 + 三处是否一致」,别再去翻配置文件;
+ * 「换端点」一次改全三处(逻辑与 repoint.mjs 共用 lib/repoint.mjs),
+ * 改完可顺手验两条接缝(fs 层 / subprocess 层)并重启分区。
+ */
+
+/** 卡片上那行端点。 */
+function epLine(s) {
+  const ep = s.endpoint;
+  if (!ep || !ep.conn) return "";
+  const c = ep.conn;
+  const problems = ep.problems || [];
+  const badge = ep.consistent
+    ? '<span class="ep-ok" title="servers.json / 挂载配置 / ssh 别名三处一致">✓ 三处一致</span>'
+    : `<span class="ep-bad" title="${esc(problems.join('；'))}">✗ ${problems.length} 处不一致</span>`;
+  const root = (ep.mounts || []).map(m => m.remoteRoot).filter(Boolean)[0];
+  return `<div class="ep"><b>端点</b> <code>${esc(c.user)}@${esc(c.host)}:${esc(String(c.sshPort))}</code> ${badge}`
+    + (root ? ` · 挂载根 <code>${esc(root)}</code>` : "")
+    + ` · 引用它的挂载配置 ${(ep.mounts || []).length} 个</div>`;
+}
+
+let epName = null;
+
+async function epOpen(name) {
+  epName = name;
+  document.getElementById("epErr").textContent = "";
+  const out = document.getElementById("epOut");
+  out.style.display = "none"; out.textContent = "";
+  document.getElementById("epTitle").textContent = `换端点 · ${name}`;
+  document.getElementById("epCurrent").textContent = "读取当前端点…";
+  document.getElementById("epModal").classList.add("open");
+  try {
+    const { endpoint: ep } = await api("/api/endpoint?name=" + encodeURIComponent(name));
+    const c = ep.conn || {};
+    document.getElementById("epCurrent").innerHTML =
+      `当前: <code>${esc(c.user)}@${esc(c.host)}:${esc(String(c.sshPort))}</code> `
+      + (ep.consistent ? '<span class="ep-ok">✓ 三处一致</span>'
+        : `<span class="ep-bad">✗ ${esc((ep.problems || []).join('；'))}</span>`);
+    document.getElementById("ep-host").value = c.host || "";
+    document.getElementById("ep-port").value = c.sshPort != null ? String(c.sshPort) : "";
+    document.getElementById("ep-user").value = c.user || "root";
+  } catch (e) {
+    document.getElementById("epCurrent").textContent = "读取失败: " + e.message;
+  }
+}
+function epClose() { document.getElementById("epModal").classList.remove("open"); }
+
+function epPreview() { return epSubmit(true); }
+function epApply() {
+  const h = document.getElementById("ep-host").value.trim();
+  const p = document.getElementById("ep-port").value;
+  if (!confirm(`确认把 ${epName} 的端点改到 ${h}:${p}?\n(三处都会改,每处先备份 *.bak-<时间戳>)`)) return;
+  return epSubmit(false);
+}
+
+async function epSubmit(dryRun) {
+  const body = {
+    name: epName,
+    host: document.getElementById("ep-host").value.trim(),
+    port: Number(document.getElementById("ep-port").value),
+    user: document.getElementById("ep-user").value.trim() || undefined,
+    sshConfig: document.getElementById("ep-sshconfig").checked,
+    restart: !dryRun && document.getElementById("ep-restart").checked,
+    dryRun,
+    verify: !dryRun,
+  };
+  const out = document.getElementById("epOut");
+  out.style.display = "block";
+  out.textContent = dryRun ? "预览中…" : "应用中(如果勾了重启,要等实例起来)…";
+  document.getElementById("epErr").textContent = "";
+  try {
+    const r = await api("/api/endpoint", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    out.textContent = epFormat(r, dryRun);
+    if (!dryRun) { toast("端点已改"); refresh(); }
+  } catch (e) {
+    document.getElementById("epErr").textContent = e.message;
+    out.textContent = "";
+  }
+}
+
+function epFormat(r, dryRun) {
+  const L = [];
+  const plan = r.plan || {};
+  L.push(`${dryRun ? "[预览,未写盘]" : "已应用"}   ${plan.nextUser}@${plan.host}:${plan.port}`);
+  for (const c of plan.changes || []) {
+    if (c.kind === "servers") L.push(`  ① servers.json 的 conn   ${c.before.host ?? "-"}:${c.before.sshPort ?? "-"}  →  ${c.after.host}:${c.after.sshPort}`);
+    if (c.kind === "mount") L.push(`  ② ${c.label}   sshTarget=${c.after.sshTarget}  ${JSON.stringify(c.after.sshExtraArgs)}`);
+    if (c.kind === "sshConfig") L.push(`  ③ ~/.ssh/config   ${c.found ? `HostName ${c.after.host} / Port ${c.after.port}` : "没有该 Host 块,跳过"}`);
+  }
+  if (r.skipped && r.skipped.length) L.push(`  跳过: ${r.skipped.join("、")}`);
+  if (r.backups && r.backups.length) L.push(`  备份 ${r.backups.length} 个: ${r.backups.map(b => b.split("/").pop()).join(", ")}`);
+  if (r.restarted) L.push(`  重启: ${r.restarted.ready ? "就绪" : "未就绪"}  (:${r.restarted.port})${r.restarted.msg ? "  " + r.restarted.msg : ""}`);
+  if (r.verify) {
+    const f = r.verify.fs || {}, s2 = r.verify.subprocess || {};
+    L.push(`  验 fs 层:         ${f.ok ? `✓ ${f.root} 下 ${f.entries} 项` : `✗ ${f.error || "不通"}`}`);
+    L.push(`  验 subprocess 层: ${s2.ok ? `✓ ${String(s2.stdout || "").split("\n").join(" / ")}` : `✗ ${s2.error || "不通"}`}`);
+  }
+  return L.join("\n");
+}
+
+/** 只验通,不改任何配置。 */
+async function epVerify(name) {
+  const el = document.getElementById("test-" + name);
+  if (el) el.innerHTML = '<span class="muted">验通中…(两条接缝各试一次)</span>';
+  try {
+    const r = await api("/api/endpoint/verify?name=" + encodeURIComponent(name));
+    const f = r.fs || {}, s2 = r.subprocess || {};
+    if (el) el.innerHTML =
+      `<div class="${f.ok ? "ok" : "bad"}">fs 层 (servers.json→SFTP): ${f.ok ? `✓ ${esc(f.root)} 下 ${f.entries} 项` : `✗ ${esc(f.error || "不通")}`}</div>`
+      + `<div class="${s2.ok ? "ok" : "bad"}">subprocess 层 (sshTarget): ${s2.ok ? `✓ ${esc(String(s2.stdout || "").split("\n").join(" / "))}` : `✗ ${esc(s2.error || "不通")}`}</div>`
+      + ((f.ok || s2.ok) ? "" : '<div class="muted">两层都不通 —— 实例可能关了,或端口又变了(点「🔀 换端点」填新端口)</div>');
+  } catch (e) {
+    if (el) el.innerHTML = `<span class="bad">验通失败: ${esc(e.message)}</span>`;
+  }
+}
+
 async function refresh() {
   try {
     const [{ servers }, meta] = await Promise.all([api("/api/servers"), api("/api/meta")]);
@@ -311,12 +467,15 @@ async function refresh() {
             ? `本地实例 :${s.dshPort}${s.home ? ` · DSH_HOME=${esc(s.home)}` : ""}`
             : `SSH :${s.sshPort} → 远程 :${s.dshPort} → 本地 :${s.localPort}`}</div>
           ${s.note ? `<div>${esc(s.note)}</div>` : ""}
+          ${epLine(s)}
           <div class="test-result" id="test-${esc(s.name)}"></div>
         </div>
         <div class="btns">
           <button class="primary" onclick="doConnect('${esc(s.name)}')">🔌 连接</button>
           <button onclick="doOpen('${esc(s.name)}')">🌐 打开窗口</button>
           <button onclick="doTest('${esc(s.name)}')">🧪 测试</button>
+          <button onclick="epOpen('${esc(s.name)}')">🔀 换端点</button>
+          <button onclick="epVerify('${esc(s.name)}')">🔍 验通</button>
           <button onclick="fmOpen('${esc(s.name)}')">📁 文件</button>
           <button onclick="doSetupKey('${esc(s.name)}')">🔑 部署密钥</button>
           <button onclick="doInitServer('${esc(s.name)}')">⚡ 初始化</button>
