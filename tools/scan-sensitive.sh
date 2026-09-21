@@ -35,7 +35,7 @@ PATS+=('sk-[A-Za-z0-9]{20,}')
 PATS+=('xox[baprs]-')
 # 「键 = "值"」形态的凭据赋值(值要求有一定长度,避免把代码里的空串/短串当命中)
 Q="[\"']"
-PATS+=("(api[_-]?key|secret|passwd|password)${Q}?[[:space:]]*[:=][[:space:]]*${Q}[^\"']{8,}")
+PATS+=("(api[_-]?key|access[_-]?key|secret|token|passwd|password|credential|auth)${Q}?[[:space:]]*[:=][[:space:]]*${Q}[^\"']{8,}")
 # 未加引号的赋值:要求值够长**且不含点** —— 否则 `password: explicit.password`
 # 这类「把别的字段赋给 password 字段」的普通代码会被误报(实测踩到)
 PATS+=("(api[_-]?key|secret|token|passwd|password)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9_-]{24,}")
