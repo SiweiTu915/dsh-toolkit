@@ -8,6 +8,7 @@
  * 页面提供: 服务器清单 / 一键建隧道 / 一键打开窗口 / 状态探测 / 添加删除
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync, openSync, closeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -28,6 +29,26 @@ const STATE_DIR = join(ROOT, ".state");
 const PIDS_FILE = join(STATE_DIR, "tunnels.json");
 
 const PANEL_PORT = Number(process.argv.find((a, i) => process.argv[i - 1] === "--port") ?? 4100);
+
+// ── 面板鉴权(共享密钥)──────────────────────────────────────────────────
+// 面板只监听回环,但「回环」不等于「安全」:任何本机页面都能打 127.0.0.1:4100,
+// 而 /api/rw/* 拿着 SSH 凭据能读写远程文件(受范围围栏约束,但那管的是「哪儿」,
+// 不是「谁」)。所以补一层密钥:启动时生成(或复用) .state/panel-token(权限 600),
+// /api/* 一律校验。面板页面自己从注入的 <meta> 里取 —— 同源,不经 URL,
+// 因此不会漏进 Referer / 历史记录。
+const PANEL_TOKEN = ensurePanelToken();
+
+function ensurePanelToken() {
+  const file = join(STATE_DIR, "panel-token");
+  try {
+    const t = readFileSync(file, "utf8").trim();
+    if (t) return t;
+  } catch { /* 还没有,下面生成 */ }
+  const t = randomBytes(24).toString("hex");
+  mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(file, `${t}\n`, { mode: 0o600 });
+  return t;
+}
 
 // ── 远程文件浏览:SFTP 连接缓存(60 秒空闲自动断开) ──────────────────────
 const fileConns = new Map(); // 机器名 → { conn, timer }
@@ -446,11 +467,12 @@ async function verifyEndpoint(name) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PANEL_PORT}`);
-  // 允许本机工作台(3080/3090 等)的页面直接调用本面板的 /api/rw/*(仅监听回环,风险可控)
+  // 允许本机工作台(3080/3090 等)的页面直接调用本面板的 /api/*。
+  // Allow-Headers 必须带上 X-Panel-Token,否则跨源预检过不去 —— 而 /api/* 现在都要密钥。
   const cors = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-Panel-Token",
   };
   if (req.method === "OPTIONS") { res.writeHead(204, cors); res.end(); return; }
   const send = (code, obj) => {
@@ -458,9 +480,22 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify(obj));
   };
   try {
+    // /api/* 一律校验共享密钥。OPTIONS 预检放行 —— 否则浏览器发不出带自定义头的请求。
+    if (url.pathname.startsWith("/api/")) {
+      const got = req.headers["x-panel-token"] || url.searchParams.get("token");
+      if (got !== PANEL_TOKEN) {
+        return send(401, {
+          error: "未授权:缺少或错误的 panel token。面板页面会自动带上;" +
+            "命令行请加 -H \"X-Panel-Token: $(cat ~/.dsh/dsh-remote/.state/panel-token)\"",
+        });
+      }
+    }
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(readFileSync(join(ROOT, "panel.html")));
+      // 把 token 注入页面(同源读取,不经 URL)。panel.html 每次请求现读,改完刷新即生效。
+      const html = readFileSync(join(ROOT, "panel.html"), "utf8")
+        .replace("</head>", `<meta name="panel-token" content="${PANEL_TOKEN}">\n</head>`);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(html);
       return;
     }
     if (url.pathname === "/api/meta") {

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# git pre-commit hook —— 提交前扫「暂存区」。
+#
+# 为什么要有它:本机的 sync-to-repo.sh 里也有一道扫描,但那只在「走同步脚本」这条
+# 路径上有效 —— 手动 `git commit` 可以完全绕过它(实测绕过过两次,其中一次把不该
+# 公开的东西提交并推送了)。hook 挂在提交动作本身上,绕不过。
+#
+# 安装:tools/install-hooks.sh(.git/hooks 默认不被版本控制,所以要显式装一次)
+# 临时跳过(确认是误报时):git commit --no-verify
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(git -C "$here" rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "pre-commit: 不在 git 仓库里" >&2; exit 1
+}
+exec bash "$root/tools/scan-sensitive.sh" --staged
