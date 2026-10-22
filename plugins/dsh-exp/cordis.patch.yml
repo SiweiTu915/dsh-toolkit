@@ -1,0 +1,4 @@
+# 把 exp 工具插进组合。纯增量：自己走 ssh，不替换任何 provider。
+- insert:
+    - id: exp
+      name: dsh-exp
