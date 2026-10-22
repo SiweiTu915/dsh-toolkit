@@ -223,11 +223,22 @@ async function installVersion(version) {
     }
   }
   if (r.status !== 0) {
+    // 失败时把半成品目录删掉：否则 `harness/<version>/` 会留个空壳，
+    // 用 `ls` 一看像是"已安装"，很容易把**进行中/失败**误判成**装好了**。
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
     const tail = (r.stderr || '').split('\n').slice(-8).join('\n')
-    die(`安装 ${version} 失败：\n${tail}`)
+    die(`安装 ${version} 失败（已清理半成品目录）：\n${tail}`)
   }
+  // 校验两件事：包的版本对得上，且**入口二进制真的在**（只看版本会漏掉装了一半的目录）。
   const got = versionOfInstall(dir)
-  if (got !== version) die(`安装后版本校验失败：期望 ${version}，实际 ${got}`)
+  if (got !== version) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+    die(`安装后版本校验失败：期望 ${version}，实际 ${got}（已清理）`)
+  }
+  if (!existsSync(binPathFor(dir))) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+    die(`安装后缺少入口二进制：${binPathFor(dir)}（已清理）`)
+  }
   return dir
 }
 

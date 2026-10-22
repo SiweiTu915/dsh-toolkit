@@ -1,0 +1,5 @@
+# 把 memory 工具插进组合。它只读 ~/.dsh/memory/*.md，
+# 不替换任何官方 provider —— 属于「纯增量」插件。
+- insert:
+    - id: memory
+      name: dsh-memory

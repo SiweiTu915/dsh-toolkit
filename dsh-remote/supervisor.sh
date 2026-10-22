@@ -29,6 +29,20 @@ export PATH="$(dirname "$NODE_BIN"):$HOME/.dsh/bin:/usr/local/bin:/opt/homebrew/
 
 log "supervisor 启动 (DIR=$DIR, NODE=$NODE_BIN)"
 
+# 让手机/平板也能用**同一个**面板:绑定本机局域网地址(每次启动现查,DHCP 变了也不怕)。
+# 取不到就退回回环 —— 面板宁可不对外,也不能绑错地址。
+PANEL_HOST_IP=""
+for ifc in en0 en1 en2; do
+  PANEL_HOST_IP="$(ipconfig getifaddr "$ifc" 2>/dev/null || true)"
+  [ -n "${PANEL_HOST_IP}" ] && break
+done
+if [ -n "${PANEL_HOST_IP}" ]; then
+  export PANEL_HOST="${PANEL_HOST_IP}"
+  log "面板绑定 ${PANEL_HOST_IP}（其他设备需带 token 进入；本机回环免 token）"
+else
+  log "未取到局域网 IP，面板只绑回环"
+fi
+
 # 1) 后台恢复隧道 / 直启实例(已有在运行的会被 cli.mjs 跳过,幂等)
 nohup "$NODE_BIN" "$DIR/cli.mjs" connect --all >> "$LOG_DIR/connect.log" 2>&1 &
 

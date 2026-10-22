@@ -16,9 +16,9 @@
  *   node cli.mjs disconnect --all         # 关闭所有隧道
  *   node cli.mjs add                      # 交互式添加一台服务器到清单
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, openSync } from "node:fs";
 import { createConnection } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -82,6 +82,49 @@ function isPortOpen(port, host = "127.0.0.1", timeoutMs = 1200) {
     sock.on("timeout", () => finish(false));
     sock.on("error", () => finish(false));
   });
+}
+
+/** 本机局域网 IPv4（必须用绝对路径：launchd 的 PATH 里没有 /usr/sbin）。 */
+let cachedLanIp = null;
+function lanIp() {
+  if (cachedLanIp !== null) return cachedLanIp;
+  for (const ifc of ["en0", "en1", "en2"]) {
+    for (const bin of ["/usr/sbin/ipconfig", "ipconfig"]) {
+      try {
+        const ip = execFileSync(bin, ["getifaddr", ifc], { encoding: "utf8", timeout: 2000 }).trim();
+        if (ip) { cachedLanIp = ip; return ip; }
+        break;
+      } catch { /* 换下一个候选 */ }
+    }
+  }
+  cachedLanIp = "";
+  return "";
+}
+
+/** direct 实例绑/访问的主机：有局域网 IP 就用它，和 panel.mjs 保持一致。 */
+function instanceHost() {
+  return lanIp() || "127.0.0.1";
+}
+
+/** direct 实例端口探测：LAN 与回环都试 —— 只看回环会把"已经在跑"误判成"没起"。 */
+async function isInstancePortOpen(port) {
+  // 以**回环**为准：实例本来就绑回环，这是"实例真的在服务"的唯一可信信号。
+  // 局域网那个地址上只是转发器 —— 转发器活着不代表后面的实例活着，
+  // 先探它会出现"面板说在线、实际打不开"的假阳性。
+  if (await isPortOpen(port, "127.0.0.1")) return true;
+  const host = instanceHost();
+  // 兼容历史上用 --host 绑过局域网的实例。
+  return host !== "127.0.0.1" ? isPortOpen(port, host) : false;
+}
+
+/** 等 direct 实例就绪（认局域网绑定）。 */
+async function waitForInstancePort(port, waitMs = 30000, intervalMs = 500) {
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (await isInstancePortOpen(port)) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
 }
 
 function isPidAlive(pid) {
@@ -186,7 +229,7 @@ async function startDirect(s) {
   const existing = pids[s.name];
   if (existing && isPidAlive(existing)) {
     // PID 可能被系统复用(重启后旧记录指向别的进程):必须端口也通才算真的在运行
-    if (await isPortOpen(s.dshPort)) {
+    if (await isInstancePortOpen(s.dshPort)) {
       console.log(`○ ${s.name} 实例已在运行 (pid ${existing})`);
       return { ok: true, pid: existing };
     }
@@ -197,25 +240,51 @@ async function startDirect(s) {
   const bin = findDshBin();
   const dshHome = s.home || join(homedir(), ".dsh");
   const port = s.localPort ?? s.dshPort;
-  const args = [bin, "web", "--port", String(s.dshPort)];
+  // 实例绑回环：PC 的 127.0.0.1:<port> 与其登录 cookie 都不变。
+  const args = [bin, "web", "--port", String(s.dshPort), "--no-open"];
   console.log(`🚀 启动 ${s.name} → ${bin} web --port ${s.dshPort} (DSH_HOME=${dshHome})`);
+  // 启动输出必须落盘：dsh web 会把一次性登录链接(含 token)打在 stdout 上，
+  // 用 stdio:"ignore" 就永远拿不到 —— 重启后手机/PC 都不知道该开哪个地址。
+  // 路径与 panel.mjs 的 bootLogPath 一致，两套启动路径共用同一份日志。
+  let stdio = "ignore";
+  try {
+    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
+    const fd = openSync(join(STATE_DIR, `boot-${s.name}.log`), "a");
+    stdio = ["ignore", fd, fd];
+  } catch { /* 打不开日志就退回 ignore */ }
   const child = spawn(process.execPath, args, {
-    stdio: "ignore",
+    stdio,
     detached: true,
     env: { ...process.env, DSH_HOME: dshHome },
   });
   child.unref();
   pids[s.name] = child.pid;
+
+  // 手机那条路：局域网 IP 上放转发器 → 回环实例（理由见 panel.mjs 同名注释）。
+  let forwarderPid = null;
+  const lanAddr = lanIp();
+  if (lanAddr && s.bindLan !== false) {
+    const oldFwd = pids[`${s.name}#fwd`];
+    if (oldFwd && isPidAlive(oldFwd)) { try { process.kill(oldFwd, "SIGTERM"); } catch { /* 已死 */ } }
+    let fwdStdio = "ignore";
+    try { const f = openSync(join(STATE_DIR, `boot-${s.name}.fwd.log`), "a"); fwdStdio = ["ignore", f, f]; } catch { /* 忽略 */ }
+    const fwd = spawn(process.execPath,
+      [join(ROOT, "port-forward.mjs"), lanAddr, String(s.dshPort), "127.0.0.1", String(s.dshPort)],
+      { stdio: fwdStdio, detached: true });
+    fwd.unref();
+    forwarderPid = fwd.pid;
+    pids[`${s.name}#fwd`] = forwarderPid;
+  }
   savePids(pids);
   // 首次启动会初始化 profile，等待更久
-  const ok = await waitForPort(port, 30000);
+  const ok = await waitForInstancePort(port, 30000);
   if (!ok) {
     console.error(`✗ ${s.name} 启动失败：端口 :${port} 未在 30 秒内打开。`);
     console.error(`  可能原因：dsh 未找到（DSH_BIN 或 PATH）、DSH_HOME 目录不可写、端口被占用、或 profile 初始化出错。`);
     console.error(`  手动验证: DSH_HOME=${dshHome} ${process.execPath} ${bin} web --port ${s.dshPort}`);
     return { ok: false, pid: child.pid };
   }
-  console.log(`✓ ${s.name} 就绪 → http://127.0.0.1:${port}`);
+  console.log(`✓ ${s.name} 就绪 → 本机 http://127.0.0.1:${port}` + (lanAddr ? ` · 局域网 http://${lanAddr}:${port}` : ""));
   return { ok: true, pid: child.pid };
 }
 
@@ -238,6 +307,9 @@ async function stopTunnel(name) {
     console.log(`○ ${name} 没有运行中的实例`);
   }
   delete pids[name];
+  const fwd = pids[`${name}#fwd`];
+  if (fwd && isPidAlive(fwd)) { try { process.kill(fwd, "SIGTERM"); } catch { /* 已死 */ } }
+  delete pids[`${name}#fwd`];
   savePids(pids);
 }
 

@@ -6,10 +6,17 @@
   "description": "SFTP-backed ctx.fs provider:让 DSH 会话的文件世界直接是一台远程机器(零本地拷贝)",
   "main": "lib/index.js",
   "exports": {
-    ".": { "default": "./lib/index.js" },
+    ".": {
+      "default": "./lib/index.js"
+    },
     "./package.json": "./package.json"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.1.5"
   }
 }

@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync, openSync, closeSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createConnection } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,9 @@ const STATE_DIR = join(ROOT, ".state");
 const PIDS_FILE = join(STATE_DIR, "tunnels.json");
 
 const PANEL_PORT = Number(process.argv.find((a, i) => process.argv[i - 1] === "--port") ?? 4100);
+// 绑定地址:默认仍是回环(和以前一模一样)。设 PANEL_HOST=<本机某个具体 IP> 才对外,
+// 供手机/平板访问同一个面板。注意 http 的 listen 接受 0.0.0.0,但这里**故意不默认对外**。
+const PANEL_HOST = process.env.PANEL_HOST || "127.0.0.1";
 
 // ── 面板鉴权(共享密钥)──────────────────────────────────────────────────
 // 面板只监听回环,但「回环」不等于「安全」:任何本机页面都能打 127.0.0.1:4100,
@@ -267,7 +270,70 @@ function isPortOpen(port, host = "127.0.0.1", timeoutMs = 1200) {
   });
 }
 
-/** 轮询等待端口就绪，最多 waitMs 毫秒。 */
+/**
+ * 本机局域网 IPv4(en0/en1/en2 里第一个有地址的),取不到返回 ""。
+ *
+ * 为什么不用 0.0.0.0:`dsh web --host` 明确拒绝通配地址,只接受某个本地接口的具体 IP。
+ * 为什么每次启动现查:DHCP 换地址后写死的 IP 会让实例直接起不来,而手机那边只是连不上。
+ */
+let cachedLanIp = null;
+function lanIp() {
+  if (cachedLanIp !== null) return cachedLanIp;
+  // 必须用绝对路径:面板由 launchd 拉起,它的 PATH 里没有 /usr/sbin,
+  // 直接跑 "ipconfig" 会 ENOENT,然后被 catch 吞掉 —— 表现就是"静默退回回环"。
+  const IPCONFIG = ["/usr/sbin/ipconfig", "ipconfig"];
+  for (const ifc of ["en0", "en1", "en2"]) {
+    for (const bin of IPCONFIG) {
+      try {
+        const ip = execFileSync(bin, ["getifaddr", ifc], { encoding: "utf8", timeout: 2000 }).trim();
+        if (ip) { cachedLanIp = ip; return ip; }
+        break; // 这个接口确实没地址,换下一个接口
+      } catch { /* 这个路径执行不了,换下一个候选 */ }
+    }
+  }
+  cachedLanIp = "";
+  return "";
+}
+
+/** direct 实例应当绑/访问的主机:有局域网 IP 就用它(手机与 PC 共用同一个地址),否则回环。 */
+function instanceHost() {
+  return lanIp() || "127.0.0.1";
+}
+
+/**
+ * 探测 direct 实例端口是否真的在服务。
+ *
+ * 实例可能绑在局域网 IP 上(`--host`),也可能还是老的回环绑定,
+ * 所以两个都试 —— 只看 127.0.0.1 会把"其实在跑"误判成"没起来"。
+ */
+async function isInstancePortOpen(port) {
+  // 以**回环**为准：实例本来就绑回环，这是"实例真的在服务"的唯一可信信号。
+  // 局域网那个地址上只是转发器 —— 转发器活着不代表后面的实例活着，
+  // 先探它会出现"面板说在线、实际打不开"的假阳性。
+  if (await isPortOpen(port, "127.0.0.1")) return true;
+  const host = instanceHost();
+  // 兼容历史上用 --host 绑过局域网的实例。
+  return host !== "127.0.0.1" ? isPortOpen(port, host) : false;
+}
+
+/**
+ * 等一台实例就绪。
+ *
+ * direct 实例现在可能绑在**局域网 IP**上(`--host`),只探 127.0.0.1 会一直等不到、
+ * 最后报"没起来"——实际它已经好了。隧道(ssh -L)仍然只看回环。
+ */
+async function waitForInstance(s, waitMs = 30000, intervalMs = 500) {
+  const port = s.localPort ?? s.dshPort;
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    const ok = s.direct ? await isInstancePortOpen(port) : await isPortOpen(port);
+    if (ok) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
+/** 轮询等待端口就绪，最多 waitMs 毫秒（回环，用于隧道）。 */
 async function waitForPort(port, waitMs = 30000, intervalMs = 500) {
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
@@ -340,6 +406,23 @@ function findDshBin() {
   return "dsh"; // 最后兜底，让 spawn 报错更直观
 }
 
+/**
+ * 从实例的启动日志里取**当前**登录 token。
+ *
+ * 不带 token 访问只会得到 401（"dsh web authentication required"），而 cookie 是按
+ * authority 绑定的：127.0.0.1 与局域网 IP 是两套登录态，换了地址就等于没登录。
+ * 所以「打开」必须带上 token，省得每次重启后手抄。
+ */
+function instanceToken(name) {
+  const file = bootLogPath(name);
+  if (!existsSync(file)) return "";
+  try {
+    const hits = readFileSync(file, "utf8").match(/token=([A-Za-z0-9_-]{16,})/g);
+    const PREFIX = "token=";
+    return hits ? hits[hits.length - 1].slice(PREFIX.length) : "";
+  } catch { return ""; }
+}
+
 /** 启动输出落盘:实例崩溃时才有得查(以前 stdio:'ignore' 完全看不到原因)。 */
 function bootLogPath(name) { return join(STATE_DIR, `boot-${name}.log`); }
 function bootLogTail(name, lines = 14) {
@@ -356,7 +439,7 @@ async function startDirect(s) {
   const existing = pids[s.name];
   if (existing && isPidAlive(existing)) {
     // PID 可能被系统复用(重启后旧记录指向别的进程):必须端口也通才算真的在运行
-    if (await isPortOpen(s.dshPort)) return { ok: true, msg: "实例已在运行" };
+    if (await isInstancePortOpen(s.dshPort)) return { ok: true, msg: "实例已在运行" };
     console.log(`○ ${s.name} 记录过期(pid ${existing}),重新启动`);
     delete pids[s.name];
     savePids(pids);
@@ -370,7 +453,8 @@ async function startDirect(s) {
     fd = openSync(bootLogPath(s.name), "a");
     stdio = ["ignore", fd, fd];
   } catch { /* 打不开日志就退回 ignore */ }
-  const child = spawn(process.execPath, [bin, "web", "--port", String(s.dshPort)], {
+  // 实例**绑回环**：PC 的 http://127.0.0.1:<port>/ 和它已登录的 cookie 完全不变。
+  const child = spawn(process.execPath, [bin, "web", "--port", String(s.dshPort), "--no-open"], {
     stdio,
     detached: true,
     env: { ...process.env, DSH_HOME: dshHome },
@@ -378,31 +462,54 @@ async function startDirect(s) {
   child.unref();
   if (fd !== null) { try { closeSync(fd); } catch { /* 已关 */ } }
   pids[s.name] = child.pid;
+
+  // 手机那条路：在局域网 IP 上放一个纯 TCP 转发器 → 回环上的实例。
+  // 为什么不用 `--host` 直接绑局域网：①dsh 明确拒绝 0.0.0.0/::（"会把 RCE 暴露到网络"）；
+  // ②绑了局域网，PC 的 127.0.0.1 就失效，而 cookie 是按 authority 绑定的 —— 等于每台
+  // PC 都要重新登录一次。转发器两条路都保住，请求仍由 dsh 自己的 token 把关。
+  let forwarderPid = null;
+  const lanAddr = lanIp();
+  if (lanAddr && s.bindLan !== false) {
+    const oldFwd = pids[`${s.name}#fwd`];
+    if (oldFwd && isPidAlive(oldFwd)) { try { process.kill(oldFwd, "SIGTERM"); } catch { /* 已死 */ } }
+    let fwdStdio = "ignore";
+    try { const f = openSync(bootLogPath(`${s.name}.fwd`), "a"); fwdStdio = ["ignore", f, f]; } catch { /* 打不开就 ignore */ }
+    const fwd = spawn(process.execPath,
+      [join(ROOT, "port-forward.mjs"), lanAddr, String(s.dshPort), "127.0.0.1", String(s.dshPort)],
+      { stdio: fwdStdio, detached: true });
+    fwd.unref();
+    forwarderPid = fwd.pid;
+    pids[`${s.name}#fwd`] = forwarderPid;
+  }
   savePids(pids);
-  return { ok: true, msg: `实例启动 (pid ${child.pid}, DSH_HOME=${dshHome})` };
+  return { ok: true, msg: `实例启动 (pid ${child.pid}, DSH_HOME=${dshHome})${forwarderPid ? `；局域网转发 ${lanAddr}:${s.dshPort} (pid ${forwarderPid})` : ""}` };
 }
 async function stopTunnel(name) {
   const pids = loadPids();
   const pid = pids[name];
   const server = loadServers().find((s) => s.name === name);
   const port = server ? (server.localPort ?? server.dshPort) : null;
-  const serving = pid && isPidAlive(pid) && port && (await isPortOpen(port));
+  const serving = pid && isPidAlive(pid) && port && (await isInstancePortOpen(port));
   if (serving) { try { process.kill(pid, "SIGTERM"); } catch {} }
   else if (pid && isPidAlive(pid)) { console.log(`○ ${name} 记录过期(pid 已不属于本实例),未执行 kill`); }
   delete pids[name];
+  // 转发器必须跟着实例一起收掉，否则下次启动会因端口被占而"看起来没起来"。
+  const fwdPid = pids[`${name}#fwd`];
+  if (fwdPid && isPidAlive(fwdPid)) { try { process.kill(fwdPid, "SIGTERM"); } catch { /* 已死 */ } }
+  delete pids[`${name}#fwd`];
   savePids(pids);
 }
 async function serverStatus(s) {
   const pids = loadPids();
   const tunnelUp = Boolean(pids[s.name] && isPidAlive(pids[s.name]));
   const port = s.localPort ?? s.dshPort;
-  const portOpen = await isPortOpen(port);
+  const portOpen = await isInstancePortOpen(port);
   return {
     ...s,
     tunnelUp,
     portOpen,
     state: tunnelUp && portOpen ? "online" : tunnelUp ? "tunneling" : "offline",
-    url: `http://127.0.0.1:${port}`,
+    url: `http://${instanceHost()}:${port}`,
   };
 }
 
@@ -415,7 +522,7 @@ async function testServer(s) {
       detail: sshOk ? "端口可达（未验证认证）" : "端口不可达：检查网络/防火墙/sshd 是否开启" });
   }
   const port = s.localPort ?? s.dshPort;
-  const localOk = await isPortOpen(port, "127.0.0.1", 1200);
+  const localOk = await isInstancePortOpen(port);
   checks.push({ name: s.direct ? "实例" : "隧道", host: "127.0.0.1", port, ok: localOk,
     detail: localOk ? "端口就绪" : "未就绪：先连接，或检查实例/隧道" });
   return { name: s.name, checks };
@@ -465,7 +572,39 @@ async function verifyEndpoint(name) {
   return out;
 }
 
-const server = createServer(async (req, res) => {
+/** 请求是否来自本机回环。 */
+function fromLoopback(req) {
+  const a = req.socket?.remoteAddress || "";
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+
+/** 从 cookie 取 panel-token(其他设备首次用 ?token= 换到 cookie 之后走这条)。 */
+function tokenFromCookie(req) {
+  for (const part of String(req.headers.cookie || "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() !== "panel-token") continue;
+    try { return decodeURIComponent(part.slice(eq + 1).trim()); } catch { return ""; }
+  }
+  return "";
+}
+
+/** 请求携带的密钥:请求头 > 查询串 > cookie。 */
+function tokenFromRequest(req, url) {
+  return req.headers["x-panel-token"] || url.searchParams.get("token") || tokenFromCookie(req) || "";
+}
+
+/**
+ * 本机回环请求视为已授权;其他设备必须出示密钥。
+ *
+ * 为什么页面也要密钥:页面会把 token 注入 <meta>,而面板能改端点、能读写远程文件。
+ * 一旦绑到局域网却只给 /api/* 上锁,同网段任何设备只要打开页面就能读到 token —— 等于没锁。
+ */
+function authorized(req, url) {
+  return fromLoopback(req) || tokenFromRequest(req, url) === PANEL_TOKEN;
+}
+
+const handle = async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PANEL_PORT}`);
   // 允许本机工作台(3080/3090 等)的页面直接调用本面板的 /api/*。
   // Allow-Headers 必须带上 X-Panel-Token,否则跨源预检过不去 —— 而 /api/* 现在都要密钥。
@@ -480,10 +619,10 @@ const server = createServer(async (req, res) => {
     res.end(JSON.stringify(obj));
   };
   try {
-    // /api/* 一律校验共享密钥。OPTIONS 预检放行 —— 否则浏览器发不出带自定义头的请求。
+    // 非回环的设备必须出示密钥;/api/* 与页面一视同仁(页面里注入着 token)。
+    const authed = authorized(req, url);
     if (url.pathname.startsWith("/api/")) {
-      const got = req.headers["x-panel-token"] || url.searchParams.get("token");
-      if (got !== PANEL_TOKEN) {
+      if (!authed) {
         return send(401, {
           error: "未授权:缺少或错误的 panel token。面板页面会自动带上;" +
             "命令行请加 -H \"X-Panel-Token: $(cat ~/.dsh/dsh-remote/.state/panel-token)\"",
@@ -491,6 +630,26 @@ const server = createServer(async (req, res) => {
       }
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
+      // 其他设备首次进来:用 ?token=… 换一个 cookie,再 303 回 / ——
+      // 这样密钥不留在地址栏和浏览器历史里(与 DSH 自身的登录流程一致)。
+      if (!authed) {
+        res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(`<!doctype html><meta charset="utf-8"><title>401</title>
+<h1>需要密钥</h1>
+<p>从其他设备访问面板必须带密钥:</p>
+<pre>http://&lt;本机局域网IP&gt;:${PANEL_PORT}/?token=&lt;panel-token&gt;</pre>
+<p>密钥在 <code>~/.dsh/dsh-remote/.state/panel-token</code>;本机回环访问无需密钥。</p>`);
+        return;
+      }
+      if (url.searchParams.get("token") === PANEL_TOKEN && !fromLoopback(req)) {
+        res.writeHead(303, {
+          "Location": "./",
+          "Set-Cookie": `panel-token=${PANEL_TOKEN}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`,
+          "Cache-Control": "no-store",
+        });
+        res.end();
+        return;
+      }
       // 把 token 注入页面(同源读取,不经 URL)。panel.html 每次请求现读,改完刷新即生效。
       const html = readFileSync(join(ROOT, "panel.html"), "utf8")
         .replace("</head>", `<meta name="panel-token" content="${PANEL_TOKEN}">\n</head>`);
@@ -569,7 +728,7 @@ const server = createServer(async (req, res) => {
           await stopTunnel(s.name);
           const started = s.direct ? await startDirect(s) : await startTunnel(s);
           const p = s.localPort ?? s.dshPort;
-          const ready = await waitForPort(p, 60000);
+          const ready = await waitForInstance(s, 60000);
           restarted = { ready, msg: started?.msg, port: p, server: await serverStatus(s) };
         } else {
           restarted = { ready: false, msg: "机器不在清单里,未重启" };
@@ -594,7 +753,7 @@ const server = createServer(async (req, res) => {
       const r = s.direct ? await startDirect(s) : await startTunnel(s);
       // 等端口就绪（direct 首次初始化最长 30s），再返回最新状态
       const port = s.localPort ?? s.dshPort;
-      const ok = await waitForPort(port);
+      const ok = await waitForInstance(s);
       const status = await serverStatus(s);
       if (!ok) return send(200, { result: { ...r, ready: false }, server: status });
       send(200, { result: { ...r, ready: true }, server: status });
@@ -606,7 +765,7 @@ const server = createServer(async (req, res) => {
       for (const s of servers) {
         const r = s.direct ? await startDirect(s) : await startTunnel(s);
         const port = s.localPort ?? s.dshPort;
-        const ok = await waitForPort(port, 30000);
+        const ok = await waitForInstance(s, 30000);
         results.push({ name: s.name, ready: ok, msg: r.msg });
       }
       send(200, { results });
@@ -630,12 +789,18 @@ const server = createServer(async (req, res) => {
       const servers = loadServers();
       const s = servers.find((x) => x.name === name);
       if (!s) return send(404, { error: "not found" });
-      const target = `http://127.0.0.1:${s.localPort ?? s.dshPort}`;
+      const port = s.localPort ?? s.dshPort;
+      const tok = instanceToken(s.name);
+      const q = tok ? `/?token=${tok}` : "/";
+      // 本机点「打开」走回环；同时把局域网地址回给页面，方便发给手机。
+      const target = `http://127.0.0.1:${port}${q}`;
+      const lanAddr = lanIp();
+      const lanUrl = lanAddr ? `http://${lanAddr}:${port}${q}` : null;
       const p = process.platform === "darwin" ? spawn("open", [target], { stdio: "ignore", detached: true })
         : process.platform === "win32" ? spawn("cmd", ["/c", "start", "", target], { stdio: "ignore", detached: true })
         : spawn("xdg-open", [target], { stdio: "ignore", detached: true });
       p.unref();
-      send(200, { opened: target });
+      send(200, { opened: target, lanUrl, hasToken: Boolean(tok) });
       return;
     }
     if (url.pathname === "/api/test") {
@@ -777,10 +942,10 @@ const server = createServer(async (req, res) => {
       created.steps.push({ title: "注册进清单", ok: true, detail: `${record.name} → :${record.dshPort}` });
 
       const started = await startDirect(record);
-      const ready = await waitForPort(record.dshPort);
+      const ready = await waitForInstance(record);
       await new Promise((r) => setTimeout(r, 2500)); // 端口开放 ≠ 启动成功:崩溃前端口也会短暂打开
       const alive = isPidAlive(loadPids()[record.name]);
-      const stable = ready && alive && (await isPortOpen(record.dshPort));
+      const stable = ready && alive && (await isInstancePortOpen(record.dshPort));
       const diagnosis = stable ? "" : bootLogTail(record.name);
       created.steps.push({
         title: "启动实例",
@@ -792,7 +957,7 @@ const server = createServer(async (req, res) => {
         ok: stable,
         error: stable ? undefined : "实例启动后未能稳定存活",
         server: await serverStatus(record),
-        url: `http://127.0.0.1:${record.dshPort}`,
+        url: `http://${instanceHost()}:${record.dshPort}`,
         home: created.home,
         mountRoot: created.mountRoot,
         bootLog: bootLogPath(record.name),
@@ -1037,9 +1202,21 @@ const server = createServer(async (req, res) => {
   } catch (e) {
     send(500, { error: String(e?.message ?? e) });
   }
-});
+};
 
-server.listen(PANEL_PORT, "127.0.0.1", () => {
-  console.log(`dsh-remote 控制面板: http://127.0.0.1:${PANEL_PORT}`);
-  console.log("本页面只在本机提供服务，请勿暴露到公网。");
-});
+// 同时监听回环 + 局域网接口（同一端口、不同地址）：
+//   - 回环：PC 上继续用 http://127.0.0.1:4100，免 token；
+//   - 局域网：手机/平板用 http://<本机IP>:4100，必须带 token。
+// 只绑局域网会让 PC 的 127.0.0.1 失效，只绑回环手机又进不来，所以两个都听。
+const WILDCARD = new Set(["0.0.0.0", "::", "*"]);
+const listenHosts = WILDCARD.has(PANEL_HOST) ? [PANEL_HOST] : ["127.0.0.1", PANEL_HOST];
+for (const host of [...new Set(listenHosts)]) {
+  createServer(handle).listen(PANEL_PORT, host, () => {
+    if (host === "127.0.0.1") {
+      console.log(`dsh-remote 控制面板（本机）: http://127.0.0.1:${PANEL_PORT}`);
+    } else {
+      console.log(`dsh-remote 控制面板（其他设备）: http://${host}:${PANEL_PORT}/?token=<panel-token>`);
+      console.log("页面与 /api/* 都要 token；本机回环访问免 token。请勿暴露到公网。");
+    }
+  });
+}
