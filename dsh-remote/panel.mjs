@@ -813,8 +813,36 @@ const handle = async (req, res) => {
     if (url.pathname === "/go") {
       const name = url.searchParams.get("name");
       const servers = loadServers();
-      const s = name ? servers.find((x) => x.name === name) : servers.find((x) => x.direct);
-      if (!s) return send(404, { error: name ? `没有机器 "${name}"` : "没有 direct 实例" });
+      const directs = servers.filter((x) => x.direct);
+
+      // 不带 name 时**不要猜**：以前会默默跳到第一台（可能是 sim-* 那种空实例），
+      // 看到的是一个"打不开/很怪"的页面。改成给一个明确的入口列表。
+      if (!name) {
+        const rows = [];
+        for (const d of directs) {
+          const port = d.localPort ?? d.dshPort;
+          const open = await isInstancePortOpen(port);
+          rows.push(`<li><a href="/go?name=${encodeURIComponent(d.name)}">${d.name}</a> · :${port} · ${open ? "在线" : "<b>未启动</b>"}</li>`);
+        }
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(`<!doctype html><meta charset="utf-8"><title>打开实例</title>
+<h1>选择要打开的实例</h1><ul>${rows.join("")}</ul>
+<p>建议把某个具体实例的 <code>/go?name=…</code> 存成书签。</p>`);
+        return;
+      }
+
+      const s = servers.find((x) => x.name === name);
+      if (!s) return send(404, { error: `没有机器 "${name}"` });
+      if (s.direct) {
+        const port = s.localPort ?? s.dshPort;
+        if (!(await isInstancePortOpen(port))) {
+          res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(`<!doctype html><meta charset="utf-8"><title>实例未启动</title>
+<h1>${name} 没有在运行</h1>
+<p>端口 :${port} 上没有服务。回到 <a href="/">面板</a> 点「连接」启动它。</p>`);
+          return;
+        }
+      }
       const port = s.localPort ?? s.dshPort;
       const tok = instanceToken(s.name);
       // 回环访问者用 127.0.0.1；其他设备（手机）必须用局域网地址 ——
