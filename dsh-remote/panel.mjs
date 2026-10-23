@@ -803,6 +803,28 @@ const handle = async (req, res) => {
       send(200, { opened: target, lanUrl, hasToken: Boolean(tok) });
       return;
     }
+    /**
+     * 稳定入口:永远重定向到「当前有效」的带 token 地址。
+     *
+     * 为什么需要:实例每次重启都会换 token，用户书签里的旧链接必然 401。
+     * 而 panel 自己（回环、免 token）是稳定的 —— 所以让书签指到这里，
+     * 由它去取最新 token 再 302。这样「书签永久可用」。
+     */
+    if (url.pathname === "/go") {
+      const name = url.searchParams.get("name");
+      const servers = loadServers();
+      const s = name ? servers.find((x) => x.name === name) : servers.find((x) => x.direct);
+      if (!s) return send(404, { error: name ? `没有机器 "${name}"` : "没有 direct 实例" });
+      const port = s.localPort ?? s.dshPort;
+      const tok = instanceToken(s.name);
+      // 回环访问者用 127.0.0.1；其他设备（手机）必须用局域网地址 ——
+      // 否则手机的 127.0.0.1 指向手机自己。
+      const base = fromLoopback(req) ? "127.0.0.1" : instanceHost();
+      const target = tok ? `http://${base}:${port}/?token=${tok}` : `http://${base}:${port}/`;
+      res.writeHead(302, { Location: target, "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
     if (url.pathname === "/api/test") {
       const name = url.searchParams.get("name");
       const servers = loadServers();
