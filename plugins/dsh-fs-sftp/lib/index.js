@@ -17,7 +17,7 @@
  *   localRoot/proj/src/a.py   ⇄   remoteRoot/proj/src/a.py
  * 两种拼写都接受(既容忍 harness 侧拼写,也容忍模型直接写远程绝对路径)。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join as hostJoin, posix } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -196,7 +196,17 @@ export default class SftpFileSystem extends FileSystem {
       maxTextBytes: cfg.maxTextBytes ?? DEFAULT_MAX_TEXT_BYTES,
       diffBasisMaxBytes: cfg.diffBasisMaxBytes ?? DEFAULT_DIFF_BASIS_MAX_BYTES,
       connectTimeoutMs: cfg.connectTimeoutMs ?? 20000,
+      // **只读**本地白名单:这些前缀下的路径不送远程,直接用本机 node:fs 读。
+      // 为什么需要:本机文件(~/.dsh/skills 等)在挂载点之外,围栏把它们判成
+      // FS_NOT_FOUND;而 dsh-skill-filesystem 把 FS_NOT_FOUND 当"目录不存在",
+      // 于是**每个 skill root 都被判为空** —— 工作台里就静默没有 skills。
+      // 注意:只放开读;写仍走 remotePathFor,围栏对写入照旧生效。
+      localReadRoots: Array.isArray(cfg.localReadRoots)
+        ? cfg.localReadRoots.filter((x) => typeof x === 'string' && x).map((x) => posix.normalize(x))
+        : [],
     }
+    // 一次性自证:确认只读白名单真的从条目配置传进来了(排查 skills 不可见时非常有用)
+    console.log(`dsh-fs-sftp: localReadRoots = ${JSON.stringify(this.cfg.localReadRoots)}`)
     this.locks = new Map()
     this.transportPromise = null
     this.connected = null
@@ -216,6 +226,33 @@ export default class SftpFileSystem extends FileSystem {
     if (p.startsWith(localRoot + '/')) return posix.join(remoteRoot, p.slice(localRoot.length + 1))
     if (p === remoteRoot || p.startsWith(remoteRoot === '/' ? '/' : remoteRoot + '/')) return p
     throw new FsError(`"${p}" 不在远程挂载点 ${localRoot} 之内`, 'FS_NOT_FOUND')
+  }
+
+  /** 绝对路径是否落在只读本地白名单内。 */
+  underLocalReadRoot(harnessPath) {
+    const p = posix.normalize(harnessPath)
+    return this.cfg.localReadRoots.some((root) => p === root || p.startsWith(root + '/'))
+  }
+
+  /** 本地 stat/lstat → 契约形状 { version, type, size }。 */
+  localMeta(abs, follow = true) {
+    const st = follow ? statSync(abs) : lstatSync(abs)
+    const type = st.isFile() ? 'file' : st.isDirectory() ? 'directory' : st.isSymbolicLink() ? 'symlink' : 'other'
+    return { version: `${Math.floor(st.mtimeMs)}:${st.size}`, type, size: Number(st.size) }
+  }
+
+  /** 本地列目录 → 契约条目形状。 */
+  localListDir(abs) {
+    return readdirSync(abs, { withFileTypes: true })
+      .filter((entry) => entry.name !== '.' && entry.name !== '..')
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((entry) => {
+        const child = posix.join(abs, entry.name)
+        const type = entry.isFile() ? 'file'
+          : entry.isDirectory() ? 'directory'
+            : entry.isSymbolicLink() ? 'symlink' : 'other'
+        return { name: entry.name, type, target: { targetKey: child, displayPath: child, localRead: true } }
+      })
   }
 
   /* ------------------------------ 连接管理 ------------------------------ */
@@ -325,6 +362,10 @@ export default class SftpFileSystem extends FileSystem {
     }
     const cwd = opts?.cwd ?? this.cfg.localRoot
     const absolute = posix.isAbsolute(path) ? posix.normalize(path) : posix.resolve(cwd, path)
+    if (this.underLocalReadRoot(absolute)) {
+      throwIfAborted(opts?.signal, 'resolve')
+      return { targetKey: absolute, displayPath: absolute, localRead: true }
+    }
     this.remotePathFor(absolute)
     throwIfAborted(opts?.signal, 'resolve')
     return { targetKey: absolute, displayPath: absolute }
@@ -364,6 +405,14 @@ export default class SftpFileSystem extends FileSystem {
 
   async stat(target, signal) {
     throwIfAborted(signal, 'stat')
+    if (target.localRead) {
+      try {
+        return this.localMeta(target.targetKey, true)
+      } catch (error) {
+        if (error?.code === 'ENOENT') return undefined
+        throw error
+      }
+    }
     const info = await this.probe(target.targetKey, { follow: true })
     throwIfAborted(signal, 'stat')
     return info ? this.meta(info, true) : undefined
@@ -392,6 +441,17 @@ export default class SftpFileSystem extends FileSystem {
 
   async readText(target, signal) {
     throwIfAborted(signal, 'read')
+    if (target.localRead) {
+      let text
+      try {
+        text = readFileSync(target.targetKey, 'utf8')
+      } catch (error) {
+        if (error?.code === 'ENOENT') throw new FsError(`cannot read "${target.displayPath}": not found`, 'FS_NOT_FOUND')
+        throw error
+      }
+      throwIfAborted(signal, 'read')
+      return text
+    }
     const info = await this.probe(target.targetKey, { follow: true })
     if (!info) throw new FsError(`cannot read "${target.displayPath}": not found`, 'FS_NOT_FOUND')
     if (!info.isFile()) throw new FsError(`cannot read "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
@@ -506,6 +566,15 @@ export default class SftpFileSystem extends FileSystem {
 
   async listDir(target, signal) {
     throwIfAborted(signal, 'list')
+    if (target.localRead) {
+      try {
+        return this.localListDir(target.targetKey)
+      } catch (error) {
+        if (error?.code === 'ENOENT') throw new FsError(`cannot list "${target.displayPath}": not found`, 'FS_NOT_FOUND')
+        if (error?.code === 'ENOTDIR') throw new FsError(`cannot list "${target.displayPath}": not a directory`, 'FS_NOT_DIRECTORY')
+        throw error
+      }
+    }
     const remote = this.remotePathFor(target.targetKey)
     const info = await this.probe(target.targetKey, { follow: true })
     if (!info) throw new FsError(`cannot list "${target.displayPath}": not found`, 'FS_NOT_FOUND')
