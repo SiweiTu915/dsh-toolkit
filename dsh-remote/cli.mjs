@@ -224,12 +224,39 @@ function findDshBin() {
 }
 
 /** direct 模式：本机直接启动/管理一个 dsh web 实例（模拟远程服务器，或本机多窗口）。 */
+/**
+ * 让某实例的局域网转发器与当前 IP 对齐（幂等）。理由见 panel.mjs 同名函数。
+ * @returns 是否已确保
+ */
+async function ensureForwarder(s) {
+  const lanAddr = lanIp();
+  if (!lanAddr || s.bindLan === false) return false;
+  const pids = loadPids();
+  const key = `${s.name}#fwd`;
+  const old = pids[key];
+  if (await isPortOpen(s.dshPort, lanAddr)) {
+    if (old && isPidAlive(old)) return true;
+  }
+  if (old && isPidAlive(old)) { try { process.kill(old, "SIGTERM"); } catch { /* 已死 */ } }
+  let fwdStdio = "ignore";
+  try { const f = openSync(join(STATE_DIR, `boot-${s.name}.fwd.log`), "a"); fwdStdio = ["ignore", f, f]; } catch { /* 忽略 */ }
+  const fwd = spawn(process.execPath,
+    [join(ROOT, "port-forward.mjs"), lanAddr, String(s.dshPort), "127.0.0.1", String(s.dshPort)],
+    { stdio: fwdStdio, detached: true });
+  fwd.unref();
+  pids[key] = fwd.pid;
+  savePids(pids);
+  return true;
+}
+
 async function startDirect(s) {
   const pids = loadPids();
   const existing = pids[s.name];
   if (existing && isPidAlive(existing)) {
     // PID 可能被系统复用(重启后旧记录指向别的进程):必须端口也通才算真的在运行
     if (await isInstancePortOpen(s.dshPort)) {
+      // 实例在跑，但转发器可能绑在旧 IP 上（DHCP 换了地址）——补齐。
+      await ensureForwarder(s);
       console.log(`○ ${s.name} 实例已在运行 (pid ${existing})`);
       return { ok: true, pid: existing };
     }

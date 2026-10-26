@@ -433,13 +433,46 @@ function bootLogTail(name, lines = 14) {
   } catch { return ""; }
 }
 
+/**
+ * 让某实例的局域网转发器与**当前 IP** 对齐（幂等）。
+ *
+ * 为什么需要：转发器只在启动时绑一次地址。DHCP 换了 IP 之后，
+ * 旧转发器还挂在已经不存在的地址上，表现就是「PC 能开、手机打不开」。
+ * @returns 是否已确保（没局域网 IP 或该实例禁用了对外时返回 false）
+ */
+async function ensureForwarder(s) {
+  const lanAddr = lanIp();
+  if (!lanAddr || s.bindLan === false) return false;
+  const pids = loadPids();
+  const key = `${s.name}#fwd`;
+  const old = pids[key];
+  if (await isPortOpen(s.dshPort, lanAddr)) {
+    if (old && isPidAlive(old)) return true; // 地址对得上，且进程还在
+  }
+  if (old && isPidAlive(old)) { try { process.kill(old, "SIGTERM"); } catch { /* 已死 */ } }
+  let fwdStdio = "ignore";
+  try { const f = openSync(bootLogPath(`${s.name}.fwd`), "a"); fwdStdio = ["ignore", f, f]; } catch { /* 忽略 */ }
+  const fwd = spawn(process.execPath,
+    [join(ROOT, "port-forward.mjs"), lanAddr, String(s.dshPort), "127.0.0.1", String(s.dshPort)],
+    { stdio: fwdStdio, detached: true });
+  fwd.unref();
+  pids[key] = fwd.pid;
+  savePids(pids);
+  return true;
+}
+
 /** direct 模式：本机直接启动/管理一个 dsh web 实例。 */
 async function startDirect(s) {
   const pids = loadPids();
   const existing = pids[s.name];
   if (existing && isPidAlive(existing)) {
     // PID 可能被系统复用(重启后旧记录指向别的进程):必须端口也通才算真的在运行
-    if (await isInstancePortOpen(s.dshPort)) return { ok: true, msg: "实例已在运行" };
+    if (await isInstancePortOpen(s.dshPort)) {
+      // 实例在跑，但**转发器可能绑在旧 IP 上**（DHCP 换了地址）。
+      // 这里补一次 ensureForwarder，避免"PC 能开、手机打不开"。
+      const ensured = await ensureForwarder(s);
+      return { ok: true, msg: `实例已在运行${ensured ? "（已确认局域网转发）" : ""}` };
+    }
     console.log(`○ ${s.name} 记录过期(pid ${existing}),重新启动`);
     delete pids[s.name];
     savePids(pids);
