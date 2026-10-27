@@ -29,10 +29,6 @@ export PATH="$(dirname "$NODE_BIN"):$HOME/.dsh/bin:/usr/local/bin:/opt/homebrew/
 
 log "supervisor 启动 (DIR=$DIR, NODE=$NODE_BIN)"
 
-# 只服务本机(PC)。不再绑局域网、不再起转发器 —— 面板与实例都只听回环。
-# 需要手机时再显式启用(supervisor 里设 PANEL_HOST + servers.json 里 bindLan: true)。
-log "面板只绑回环（PC 专用）"
-
 # 1) 后台恢复隧道 / 直启实例(已有在运行的会被 cli.mjs 跳过,幂等)
 nohup "$NODE_BIN" "$DIR/cli.mjs" connect --all >> "$LOG_DIR/connect.log" 2>&1 &
 
