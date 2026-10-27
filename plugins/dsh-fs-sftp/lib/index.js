@@ -97,7 +97,8 @@ function isNotFound(error) {
 function isConnectionError(error) {
   const code = error?.code
   if (typeof code === 'string' && ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) return true
-  return /connection lost|no response from server|channel closed|not connected|socket hang up|connection closed/i.test(String(error?.message ?? ''))
+  // 也认中文的「连接超时」:老版本的 sftp.mjs 抛的是裸 Error(无 code),不认就永远不重试。
+  return /connection lost|no response from server|channel closed|not connected|socket hang up|connection closed|连接超时|timed out|timeout/i.test(String(error?.message ?? ''))
 }
 
 /** SFTP 状态码 → FsError 词汇表(fs-local 用的同一套 code)。 */

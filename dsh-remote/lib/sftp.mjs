@@ -59,7 +59,13 @@ export async function connect(cfg) {
 
   const client = new Client()
   const conn = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`连接超时: ${user}@${host}:${port}`)), cfg.timeoutMs ?? 20000)
+    const timer = setTimeout(() => {
+      // 带上 code,上层(provider 的重试判定)才认得出这是"连接层抖动"而不是业务错误。
+      // 以前是裸 Error,isConnectionError 匹配不到 → 不重试 → 一次抖动就让整轮失败。
+      const error = new Error(`连接超时: ${user}@${host}:${port}`)
+      error.code = 'ETIMEDOUT'
+      reject(error)
+    }, cfg.timeoutMs ?? 20000)
     client.on('ready', () => { clearTimeout(timer); resolve(client) })
     client.on('error', (err) => { clearTimeout(timer); reject(err) })
     client.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => {
