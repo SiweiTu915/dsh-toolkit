@@ -442,7 +442,7 @@ function bootLogTail(name, lines = 14) {
  */
 async function ensureForwarder(s) {
   const lanAddr = lanIp();
-  if (!lanAddr || s.bindLan === false) return false;
+  if (!lanAddr || s.bindLan !== true) return false;
   const pids = loadPids();
   const key = `${s.name}#fwd`;
   const old = pids[key];
@@ -502,7 +502,7 @@ async function startDirect(s) {
   // PC 都要重新登录一次。转发器两条路都保住，请求仍由 dsh 自己的 token 把关。
   let forwarderPid = null;
   const lanAddr = lanIp();
-  if (lanAddr && s.bindLan !== false) {
+  if (lanAddr && s.bindLan === true) {
     const oldFwd = pids[`${s.name}#fwd`];
     if (oldFwd && isPidAlive(oldFwd)) { try { process.kill(oldFwd, "SIGTERM"); } catch { /* 已死 */ } }
     let fwdStdio = "ignore";
@@ -877,12 +877,18 @@ const handle = async (req, res) => {
         }
       }
       const port = s.localPort ?? s.dshPort;
+      // 只有 PC：一律 127.0.0.1。token 取启动日志里**最新的**那个（实例启动时打的那行）。
+      // 不做"探测验证" —— 实测这个环境里 node 的 fetch 连不上本机实例（curl 可以），
+      // 探测必然超时，反而会把正常请求判成 503。
       const tok = instanceToken(s.name);
-      // 回环访问者用 127.0.0.1；其他设备（手机）必须用局域网地址 ——
-      // 否则手机的 127.0.0.1 指向手机自己。
-      const base = fromLoopback(req) ? "127.0.0.1" : instanceHost();
-      const target = tok ? `http://${base}:${port}/?token=${tok}` : `http://${base}:${port}/`;
-      res.writeHead(302, { Location: target, "Cache-Control": "no-store" });
+      if (!tok) {
+        res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(`<!doctype html><meta charset="utf-8"><title>正在启动</title>
+<h1>${name} 正在启动 / 正在换 token</h1>
+<p>端口 :${port} 已就绪，但当前还没有可用令牌。等几秒再点一次，或回 <a href="/">面板</a> 看状态。</p>`);
+        return;
+      }
+      res.writeHead(302, { Location: `http://127.0.0.1:${port}/?token=${tok}`, "Cache-Control": "no-store" });
       res.end();
       return;
     }

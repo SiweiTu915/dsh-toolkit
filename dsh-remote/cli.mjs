@@ -230,7 +230,7 @@ function findDshBin() {
  */
 async function ensureForwarder(s) {
   const lanAddr = lanIp();
-  if (!lanAddr || s.bindLan === false) return false;
+  if (!lanAddr || s.bindLan !== true) return false;
   const pids = loadPids();
   const key = `${s.name}#fwd`;
   const old = pids[key];
@@ -290,7 +290,7 @@ async function startDirect(s) {
   // 手机那条路：局域网 IP 上放转发器 → 回环实例（理由见 panel.mjs 同名注释）。
   let forwarderPid = null;
   const lanAddr = lanIp();
-  if (lanAddr && s.bindLan !== false) {
+  if (lanAddr && s.bindLan === true) {
     const oldFwd = pids[`${s.name}#fwd`];
     if (oldFwd && isPidAlive(oldFwd)) { try { process.kill(oldFwd, "SIGTERM"); } catch { /* 已死 */ } }
     let fwdStdio = "ignore";
