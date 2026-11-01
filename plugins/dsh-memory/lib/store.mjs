@@ -186,3 +186,90 @@ export function removeEntry(scope, id) {
   if (removed) writeAtomic(file, kept.join("\n"));
   return removed;
 }
+
+/**
+ * 把文本切成 CJK 友好的检索片段：英文按词，中文按二元组。
+ * 中文没有空格，纯 `split(/\s+/)` 会整句匹配不上。
+ */
+export function terms(text) {
+  const out = new Set();
+  const lower = String(text ?? "").toLowerCase();
+  for (const word of lower.match(/[a-z0-9_]{2,}/gu) ?? []) out.add(word);
+  const cjk = lower.replace(/[^\u4e00-\u9fff]/gu, " ");
+  for (const run of cjk.split(/\s+/u)) {
+    for (let i = 0; i + 1 < run.length; i += 1) out.add(run.slice(i, i + 2));
+  }
+  return out;
+}
+
+/**
+ * 按「与当前用户消息的相关度」挑选记忆，直到撑满预算。
+ *
+ * 为什么需要：只注入索引时，模型在实际使用中几乎不会主动 search —— 记忆等于只写不读。
+ * 所以这里在**每轮装配时**用用户刚说的话做一次轻量检索，把相关条目直接放进提示。
+ *
+ * @param entries - 记忆条目数组。
+ * @param userText - 当前用户消息（拿不到就传空串）。
+ * @param budget - 字符预算。
+ * @returns { picked, omitted } —— 选中的条目与被省略的条数。
+ */
+export function selectMemories(entries, userText, budget) {
+  if (entries.length === 0) return { picked: [], omitted: 0 };
+  const total = entries.reduce((sum, e) => sum + e.text.length + 24, 0);
+  if (total <= budget) return { picked: entries, omitted: 0 }; // 装得下就全给，别让模型猜
+
+  const wanted = terms(userText);
+  const scored = entries.map((entry, index) => {
+    const own = terms(`${entry.text} ${entry.tags.join(" ")}`);
+    let hit = 0;
+    for (const term of own) if (wanted.has(term)) hit += 1;
+    // 平分时偏向更新的（数组越靠后越新）
+    return { entry, index, score: hit * 1000 + index };
+  });
+  scored.sort((left, right) => right.score - left.score);
+
+  const picked = [];
+  let used = 0;
+  for (const item of scored) {
+    const cost = item.entry.text.length + 24;
+    if (used + cost > budget) continue;
+    picked.push(item.entry);
+    used += cost;
+  }
+  // 恢复成时间顺序，读起来更自然
+  picked.sort((left, right) => entries.indexOf(left) - entries.indexOf(right));
+  return { picked, omitted: entries.length - picked.length };
+}
+
+/**
+ * 渲染要注入提示的记忆块。
+ * @param scopes - [{ label, entries }]。
+ * @param userText - 当前用户消息，用于自动召回。
+ * @param budget - 字符预算（默认 2500：这个规模下直接全文注入，不依赖模型主动检索）。
+ */
+export function renderMemoryBlock(scopes, userText, budget = 2500) {
+  const lines = [];
+  let omitted = 0;
+  for (const scope of scopes) {
+    if (scope.entries.length === 0) continue;
+    const { picked, omitted: skip } = selectMemories(scope.entries, userText, budget);
+    omitted += skip;
+    if (picked.length === 0) continue;
+    lines.push(`记忆（${scope.label}，共 ${scope.entries.length} 条）:`);
+    for (const entry of picked) {
+      const tags = entry.tags.length ? ` [${entry.tags.join(",")}]` : "";
+      lines.push(`- ${entry.text}${tags}  (id:${entry.id} · ${entry.date})`);
+    }
+  }
+  if (lines.length === 0) {
+    // 一条都没放进去时**不能静默返回空** —— 那等于"没有记忆"。
+    // 至少告诉模型"有记忆，但没进预算"，让它知道可以 search。
+    return omitted > 0
+      ? `记忆：共 ${omitted} 条，本轮未进预算未显示；用 memory 工具 action="search" 按关键词取。`
+      : "";
+  }
+  if (omitted > 0) {
+    lines.push(`另有 ${omitted} 条未显示（与本轮无关或超预算）：用 memory 工具 action="search" 按关键词取。`);
+  }
+  return lines.join("\n");
+}

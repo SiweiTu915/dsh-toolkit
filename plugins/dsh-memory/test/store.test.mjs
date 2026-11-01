@@ -18,7 +18,10 @@ const {
   parseEntries,
   removeEntry,
   renderIndex,
+  renderMemoryBlock,
   searchEntries,
+  selectMemories,
+  terms,
   slugWorkspace,
   today,
 } = await import("../lib/store.mjs");
@@ -151,3 +154,46 @@ test("ENTRY_RE 不接受日期格式错误的行", () => {
 });
 
 test.after(() => rmSync(DIR, { recursive: true, force: true }));
+
+
+test("terms：英文按词、中文按二元组（中文没空格也要能匹配）", () => {
+  const t = terms("手机上用局域网地址 GPU 端口");
+  assert.ok(t.has("gpu"), "英文词");
+  assert.ok(t.has("手机"), "中文二元组");
+  assert.ok(t.has("局域"), "跨词边界也应切出二元组");
+});
+
+test("selectMemories：装得下就全部给出（不让模型猜）", () => {
+  const entries = parseEntries(["- 短记忆一  <!-- id:aaaa0005 · 2026-10-22 -->", "- 短记忆二  <!-- id:bbbb0005 · 2026-10-22 -->"].join("\n"));
+  const { picked, omitted } = selectMemories(entries, "完全无关的话", 2500);
+  assert.equal(picked.length, 2);
+  assert.equal(omitted, 0);
+});
+
+test("selectMemories：超预算时优先给与用户消息相关的", () => {
+  const entries = parseEntries([
+    "- 手机访问工作台用局域网地址  <!-- id:aaaa0006 · 2026-10-22 · tags:手机,端口 -->",
+    "- 无关的一条很长的记忆内容用来占预算把别的挤掉  <!-- id:bbbb0006 · 2026-10-22 -->",
+  ].join("\n"));
+  const { picked, omitted } = selectMemories(entries, "手机打不开怎么办", 40);
+  assert.equal(omitted, 1, "应只挑一条");
+  assert.equal(picked.length, 1);
+  assert.match(picked[0].text, /手机/u, "应挑中相关的那条");
+});
+
+test("selectMemories：空记忆返回空", () => {
+  assert.deepEqual(selectMemories([], "x", 100), { picked: [], omitted: 0 });
+});
+
+test("renderMemoryBlock：空则返回空串（不注入任何东西）", () => {
+  assert.equal(renderMemoryBlock([{ label: "全局", entries: [] }], "", 2500), "");
+});
+
+test("renderMemoryBlock：含作用域、条数、id，超预算时给检索提示", () => {
+  const entries = parseEntries(["- 一条记忆内容  <!-- id:cccc0006 · 2026-10-22 · tags:x -->"].join("\n"));
+  const text = renderMemoryBlock([{ label: "全局", entries }], "", 2500);
+  assert.match(text, /记忆（全局，共 1 条）/u);
+  assert.match(text, /id:cccc0006/u);
+  const tight = renderMemoryBlock([{ label: "全局", entries }], "", 10);
+  assert.match(tight, /未显示|另有/u);
+});

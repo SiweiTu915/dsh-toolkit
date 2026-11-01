@@ -24,7 +24,7 @@ import {
   loadScope,
   memoryDir,
   removeEntry,
-  renderIndex,
+  renderMemoryBlock,
   searchEntries,
   slugWorkspace,
 } from "./store.mjs";
@@ -70,7 +70,11 @@ export const name = "memory";
 export const inject = ["tools", "systemPrompt", "workingDirectory"];
 
 /** 索引注入的硬上限（字符）。每轮都进上下文，宁短勿长。 */
-const INDEX_MAX_CHARS = 600;
+/**
+ * 注入预算（字符）。这个规模下直接全文注入 —— 索引式"只提示有记忆"在实践中
+ * 几乎不会被模型主动检索，等于只写不读。
+ */
+const MEMORY_BUDGET_CHARS = 2500;
 
 const DESCRIPTION = `跨会话记忆：把"以后仍然成立的事实"记下来，下次会话自动看到摘要。
 
@@ -135,6 +139,35 @@ const PARAMETERS = {
 };
 
 /**
+ * 取当前会话里**最后一条用户消息**的文本（拿不到就返回空串）。
+ *
+ * 用途：每轮装配时用它做一次轻量检索，把相关记忆直接放进提示 ——
+ * 否则模型在实际使用中几乎不会主动 `memory search`，记忆等于只写不读。
+ * 这里对事件形状做防御：不同版本可能是 `data.message.content` 块数组或纯字符串。
+ * @param session - 当前会话（可能为 undefined）。
+ */
+function lastUserText(session) {
+  try {
+    const events = session?.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type !== "user/message") continue;
+      const data = event.data ?? {};
+      const content = data.message?.content ?? data.content;
+      if (Array.isArray(content)) {
+        const text = content.filter((block) => block?.type === "text").map((block) => String(block.text ?? "")).join("\n");
+        if (text) return text;
+      } else if (typeof content === "string" && content) {
+        return content;
+      } else if (typeof data.text === "string" && data.text) {
+        return data.text;
+      }
+    }
+  } catch { /* 读事件失败不影响主流程 */ }
+  return "";
+}
+
+/**
  * 把一条条目渲染成一行（给模型看）。
  * @param entry - 存储条目。
  * @param scopeLabel - 展示用的作用域名。
@@ -177,7 +210,8 @@ export function apply(ctx) {
         const slug = slugWorkspace(cwdOf(session));
         const scopes = [{ label: "全局", entries: loadScope("global") }];
         if (slug) scopes.push({ label: `工作区:${slug}`, entries: loadScope(slug) });
-        return renderIndex(scopes, { maxChars: INDEX_MAX_CHARS });
+        // 预算内**直接全文注入**，不要求模型先"想到去搜"；超预算才按本轮用户消息挑。
+        return renderMemoryBlock(scopes, lastUserText(session), MEMORY_BUDGET_CHARS);
       } catch {
         return ""; // 记忆坏了也不能拖垮会话
       }
