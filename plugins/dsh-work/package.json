@@ -17,5 +17,12 @@
       ],
       "platform": "web"
     }
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
   }
 }
