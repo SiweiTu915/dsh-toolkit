@@ -16,6 +16,8 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
+// 工作项台账:面板只读它 + 提供"关闭"一个动作,判定逻辑仍在 dsh-work 插件里。
+import { loadItems, pendingItems, append } from "../plugins/dsh-work/lib/ledger.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
 import { readWorkbenchRoots, machineRoots, fencePath, describeScope, toRemoteUnder } from "./lib/scope.mjs";
 import { readEndpoint, planRepoint, applyRepoint } from "./lib/repoint.mjs";
@@ -481,9 +483,15 @@ const server = createServer(async (req, res) => {
   };
   try {
     // /api/* 一律校验共享密钥。OPTIONS 预检放行 —— 否则浏览器发不出带自定义头的请求。
+      // /api/work* 是**只能从本机**读的只读台账(不碰远程、不写文件),回环免 token ——
+      // 否则 DSH 侧栏插件(跑在 3080,拿不到本面板的 token)没法把「需要你」列出来。
+      const remoteAddr = String(req.socket?.remoteAddress ?? "");
+      const loopback = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1";
+      const workReadOnly = loopback && url.pathname.startsWith("/api/work")
+        && (req.method === "GET" || url.pathname === "/api/work/close");
     if (url.pathname.startsWith("/api/")) {
       const got = req.headers["x-panel-token"] || url.searchParams.get("token");
-      if (got !== PANEL_TOKEN) {
+      if (!workReadOnly && got !== PANEL_TOKEN) {
         return send(401, {
           error: "未授权:缺少或错误的 panel token。面板页面会自动带上;" +
             "命令行请加 -H \"X-Panel-Token: $(cat ~/.dsh/dsh-remote/.state/panel-token)\"",
@@ -500,6 +508,32 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === "/api/meta") {
       send(200, { configFile: CONFIG, panelPort: PANEL_PORT });
+      return;
+    }
+    // ── 工作项(侧栏「需要你」用)────────────────────────────────────────────
+    if (url.pathname === "/api/work" && req.method === "GET") {
+      try {
+        const all = loadItems();
+        send(200, {
+          pending: pendingItems(),
+          closed: all.filter((item) => item.closed).length,
+          total: all.length,
+        });
+      } catch (error) {
+        send(500, { error: `读台账失败: ${error?.message ?? error}` });
+      }
+      return;
+    }
+    if (url.pathname === "/api/work/close" && req.method === "POST") {
+      try {
+        const body = await readBody(req);
+        const id = String(body?.id ?? "").trim();
+        if (!id) return send(400, { error: "需要 id" });
+        append({ op: "close", id, note: String(body?.note ?? "") });
+        send(200, { ok: true, pending: pendingItems() });
+      } catch (error) {
+        send(500, { error: `关闭失败: ${error?.message ?? error}` });
+      }
       return;
     }
     if (url.pathname === "/api/servers" && req.method === "GET") {

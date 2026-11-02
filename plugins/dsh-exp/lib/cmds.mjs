@@ -215,6 +215,10 @@ export function parseStatus(stdout) {
     fields[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
   }
   return {
+    state: fields.STATE || "unknown",
+    exit: fields.EXIT && fields.EXIT !== "-" ? fields.EXIT : undefined,
+    finished: fields.FINISHED && fields.FINISHED !== "-" ? fields.FINISHED : undefined,
+    logMod: fields.LOGMOD && fields.LOGMOD !== "-" ? Number(fields.LOGMOD) : undefined,
     running: fields.STATE === "running",
     pid: fields.PID && fields.PID !== "-" ? fields.PID : null,
     started: fields.STARTED || null,

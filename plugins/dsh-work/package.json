@@ -1,0 +1,21 @@
+{
+  "name": "dsh-work",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "工作项台账：把「实验跑完了」变成一条待办，并让模型给出判断",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ],
+      "platform": "web"
+    }
+  }
+}

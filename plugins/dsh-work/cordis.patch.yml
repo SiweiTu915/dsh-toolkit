@@ -1,0 +1,4 @@
+# dsh-work 的 loader 补丁：插入一个工具插件（无 UI、无后台线程）。
+- insert:
+    - id: work
+      name: dsh-work
