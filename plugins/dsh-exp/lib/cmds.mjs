@@ -32,6 +32,31 @@ export function newJobId(now = Date.now(), rand = Math.random()) {
 export const REMOTE_ROOT = "$HOME/.dsh-exp";
 
 /**
+ * 作业根目录的解析前置（在远端 shell 里执行）。
+ *
+ * 为什么需要：容器类环境里 `$HOME` 常在**易失的 overlay 层**上，容器一重开
+ * `~/.dsh-exp` 里的 pid/started/log 就全没了；而数据盘通常是挂到 `$HOME` 下
+ * 某个子目录的**独立设备**。实验记录恰恰最需要活过重启，所以：
+ *   1) 显式设置 `DSH_EXP_HOME` 时用它；
+ *   2) 否则在 `$HOME/*` 里找第一个**设备号与 $HOME 不同**的目录，放它下面；
+ *   3) 都没有就退回 `$HOME/.dsh-exp`。
+ * 这里不写死任何云厂商的目录名 —— 靠 `df` 比较设备来判断持久性。
+ */
+const ROOT_PRELUDE = [
+  'EXP_ROOT="${DSH_EXP_HOME:-}"',
+  '[ -n "$EXP_ROOT" ] || {',
+  '  EXP_ROOT="$HOME/.dsh-exp"',
+  // 判断持久性:比较设备号,不写死任何云厂商目录名
+  '  home_dev=$(df -P "$HOME" 2>/dev/null | tail -1 | awk \'{print $1}\')',
+  '  for d in "$HOME"/*/; do',
+  '    [ -d "$d" ] && [ -w "$d" ] || continue',
+  '    dev=$(df -P "$d" 2>/dev/null | tail -1 | awk \'{print $1}\')',
+  '    if [ -n "$dev" ] && [ "$dev" != "$home_dev" ]; then EXP_ROOT="${d%/}/.dsh-exp"; break; fi',
+  '  done',
+  '}',
+];
+
+/**
  * 提交脚本。
  * @param params.id - 任务 id。
  * @param params.command - 要执行的 shell 命令（可多行）。
@@ -44,13 +69,15 @@ export function submitScript({ id, command, workdir }) {
   const wd = workdir ? shq(workdir) : '"$HOME"';
   return [
     "set -u",
-    `J="${REMOTE_ROOT}/jobs/${id}"`,
+    ...ROOT_PRELUDE,
+    `J="$EXP_ROOT/jobs/${id}"`,
     'mkdir -p "$J"',
     `printf %s ${shq(b64)} | base64 -d > "$J/cmd.sh"`,
     `printf '%s' ${shq(workdir || "")} > "$J/workdir"`,
     'date -u +%FT%TZ > "$J/started"',
     // wrapper：先写自己的 pid，再 exec 用户命令。setsid 后它就是 group leader。
-    "cat > \"$J/wrapper.sh\" <<'DSHEXPWRAP'\n#!/bin/bash\nJ=\"$1\"\necho $$ > \"$J/pid\"\nexec bash \"$J/cmd.sh\"\nDSHEXPWRAP",
+    // 不用 exec：要留下来记录退出码与结束时间（"结束了"不等于"成功了"）。
+    "cat > \"$J/wrapper.sh\" <<'DSHEXPWRAP'\n#!/bin/bash\nJ=\"$1\"\necho $$ > \"$J/pid\"\nbash \"$J/cmd.sh\"\ncode=$?\necho \"$code\" > \"$J/exit\"\ndate -u +%FT%TZ > \"$J/finished\"\nexit \"$code\"\nDSHEXPWRAP",
     `cd ${wd} >/dev/null 2>&1 || { echo "WORKDIR_MISSING"; exit 3; }`,
     'setsid nohup bash "$J/wrapper.sh" "$J" > "$J/log" 2>&1 < /dev/null &',
     // 等 pid 落盘（wrapper 立刻写），最多 2 秒
@@ -68,17 +95,23 @@ export function submitScript({ id, command, workdir }) {
 export function listScript() {
   return [
     "set -u",
-    `R="${REMOTE_ROOT}/jobs"`,
+    ...ROOT_PRELUDE,
+    'R="$EXP_ROOT/jobs"',
     '[ -d "$R" ] || exit 0',
     'for d in "$R"/*/; do',
     '  [ -d "$d" ] || continue',
     '  id=$(basename "$d")',
     '  pid=$(cat "$d/pid" 2>/dev/null || echo "")',
-    '  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then st=running; else st=ended; fi',
+    '  code=$(cat "$d/exit" 2>/dev/null || echo "")',
+    '  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then st=running',
+    '  elif [ -n "$code" ] && [ "$code" != "0" ]; then st=fail',
+    '  elif [ -n "$code" ]; then st=done',
+    '  else st=ended; fi',
     '  started=$(cat "$d/started" 2>/dev/null || echo -)',
     '  bytes=$(wc -c < "$d/log" 2>/dev/null | tr -d " " || echo 0)',
+    '  logmod=$(stat -c %Y "$d/log" 2>/dev/null || echo -)',
     '  last=$(tail -n 1 "$d/log" 2>/dev/null | tr -d "\\r" | cut -c1-160)',
-    '  printf "%s|%s|%s|%s|%s\\n" "$id" "$st" "$started" "$bytes" "$last"',
+    '  printf "%s|%s|%s|%s|%s|%s|%s\\n" "$id" "$st" "$started" "$bytes" "${code:--}" "$logmod" "$last"',
     "done",
   ].join("\n");
 }
@@ -93,11 +126,19 @@ export function statusScript({ id, lines = 40 }) {
   const n = Math.max(1, Math.min(2000, Number(lines) || 40));
   return [
     "set -u",
-    `J="${REMOTE_ROOT}/jobs/${id}"`,
+    ...ROOT_PRELUDE,
+    `J="$EXP_ROOT/jobs/${id}"`,
     '[ -d "$J" ] || { echo "JOB_NOT_FOUND"; exit 4; }',
     'pid=$(cat "$J/pid" 2>/dev/null || echo "")',
-    'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then st=running; else st=ended; fi',
+    'code=$(cat "$J/exit" 2>/dev/null || echo "")',
+    'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then st=running',
+    'elif [ -n "$code" ] && [ "$code" != "0" ]; then st=fail',
+    'elif [ -n "$code" ]; then st=done',
+    'else st=ended; fi',
     'echo "STATE=$st"',
+    'echo "EXIT=${code:--}"',
+    'echo "FINISHED=$(cat "$J/finished" 2>/dev/null || echo -)"',
+    'echo "LOGMOD=$(stat -c %Y "$J/log" 2>/dev/null || echo -)"',
     'echo "PID=${pid:--}"',
     'echo "STARTED=$(cat "$J/started" 2>/dev/null || echo -)"',
     'echo "WORKDIR=$(cat "$J/workdir" 2>/dev/null || echo -)"',
@@ -112,7 +153,8 @@ export function stopScript({ id }) {
   if (!ID_RE.test(id)) throw new Error(`非法 id: ${id}`);
   return [
     "set -u",
-    `J="${REMOTE_ROOT}/jobs/${id}"`,
+    ...ROOT_PRELUDE,
+    `J="$EXP_ROOT/jobs/${id}"`,
     '[ -d "$J" ] || { echo "JOB_NOT_FOUND"; exit 4; }',
     'pid=$(cat "$J/pid" 2>/dev/null || echo "")',
     '[ -n "$pid" ] || { echo "NO_PID"; exit 5; }',
@@ -137,12 +179,19 @@ export function parseList(stdout) {
     if (parts.length < 5) continue;
     const [id, state, started, bytes, ...rest] = parts;
     if (!ID_RE.test(id)) continue;
+    // 新格式 7 段：id|state|started|bytes|exit|logmod|last；老格式 5 段仍兼容。
+    const wide = rest.length >= 2;
+    const exit = wide ? rest[0] : "-";
+    const logMod = wide && /^[0-9]+$/u.test(rest[1] ?? "") ? Number(rest[1]) : undefined;
     jobs.push({
       id,
+      state,
       running: state === "running",
       started,
       bytes: Number(bytes) || 0,
-      last: rest.join("|"),
+      exit: exit === "-" ? undefined : Number(exit),
+      logMod,
+      last: rest.slice(wide ? 2 : 0).join("|"),
     });
   }
   jobs.sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
