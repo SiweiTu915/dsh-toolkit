@@ -10,7 +10,7 @@
  * 而这里只要"在远端跑一段 shell"。直接 ssh 更短、更透明，也不要求装了 provider。
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -51,11 +51,40 @@ export function resolveSsh() {
     }
   }
 
+  // 1.5) 各工作台分区自己的挂载配置（主 GUI 的 DSH_HOME 下它们在 dsh-remote/sim-homes/<name>/）
+  //      多个分区指向同一台机时，取**最近修改**的那份 —— 活跃的那个。
+  try {
+    const simRoot = join(home, "dsh-remote", "sim-homes");
+    if (existsSync(simRoot)) {
+      const candidates = [];
+      for (const entry of readdirSync(simRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const file = join(simRoot, entry.name, "remote-mount.json");
+        if (!existsSync(file)) continue;
+        const cfg = readJson(file);
+        if (!cfg?.sshTarget) continue;
+        candidates.push({ cfg, file, at: statSync(file).mtimeMs });
+      }
+      candidates.sort((left, right) => right.at - left.at);
+      const best = candidates[0];
+      if (best) {
+        return {
+          target: best.cfg.sshTarget,
+          args: Array.isArray(best.cfg.sshExtraArgs) ? best.cfg.sshExtraArgs : [],
+          source: best.file,
+        };
+      }
+    }
+  } catch { /* 读不到就走下一级 */ }
+
   // 2) 主 GUI：servers.json 里第一个远程机器
   const serversFile = join(homedir(), ".dsh", "dsh-remote", "servers.json");
   const servers = readJson(serversFile)?.servers;
   if (Array.isArray(servers)) {
-    const remote = servers.find((s) => s?.direct !== true && s?.conn?.host);
+      // 优先非 direct（真·远程机），但 direct 实例本身也可能带 conn（本机起服务 + SSH 挂盘）；
+      // 只认非 direct 会让主 GUI 里 exp 直接解析不到目标。
+      const remote = servers.find((s) => s?.direct !== true && s?.conn?.host)
+        ?? servers.find((s) => s?.conn?.host);
     if (remote) {
       const extra = Number.isFinite(Number(remote.conn.sshPort)) ? ["-p", String(remote.conn.sshPort)] : [];
       return {
