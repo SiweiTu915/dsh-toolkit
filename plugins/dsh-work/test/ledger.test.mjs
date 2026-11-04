@@ -81,3 +81,16 @@ test("pendingItems：只算未关闭且 person/* 的项", () => {
   assert.ok(!ids.includes("w-d"), "working 不算等人");
   assert.ok(!ids.includes("w-e"), "已关闭不算");
 });
+
+test("advise：被停止的作业(ended 且无退出码)不能说成仍在运行", () => {
+  const v = advise({ id: "j9", state: "ended", exit: "-", logTail: "stopped by user" });
+  assert.equal(v.state, "person/决策", "要进「等你决定」，不能是 working");
+  assert.match(v.summary, /没有记录退出码/u);
+  assert.doesNotMatch(v.summary, /仍在运行/u);
+});
+
+test("advise：真正在跑才标 working", () => {
+  const v = advise({ id: "j10", state: "running" });
+  assert.equal(v.state, "working");
+  assert.match(v.summary, /仍在运行/u);
+});

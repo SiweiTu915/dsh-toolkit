@@ -113,6 +113,21 @@ export function advise(job) {
       ].join("\n"),
     };
   }
+  // 兜底：既不是 done 也不是 fail，但**已经结束**（典型是被 stop 掉、或进程被
+  // 外部杀掉），所以没有退出码。以前这里落到 working 分支，会写出
+  // 「仍在运行」这种自相矛盾的话 —— 它是"结束了但不知道为什么结束"。
+  if (job.state !== "running") {
+    return {
+      state: "person/决策",
+      waiting: "你",
+      summary: `作业 ${job.id} 结束了，但没有记录退出码（可能被停止或异常退出${dur ? `，耗时 ${dur}` : ""}）；末行：${lastLine.slice(0, 120) || "(空)"}`,
+      advice: [
+        "先看日志末尾判断是被谁停的、停在哪一步。",
+        "如果是你手动 stop 的：确认还要不要重跑，别让它悬着。",
+        "如果是它自己没的：按失败处理，看日志最后 20 行。",
+      ].join("\n"),
+    };
+  }
   return {
     state: "working",
     waiting: "—",
