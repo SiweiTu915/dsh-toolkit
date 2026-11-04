@@ -59,7 +59,9 @@ window.__ModuleLoader__.load({
 
 		/** 拉一次台账。 */
 		async function fetchWork() {
-			const res = await fetch(`${panelBase()}/api/work`, { cache: "no-store" });
+			// 带上本工作台的端口:面板据此在**服务端**决定看哪一份(客户端说不了算)
+			const port = Number(location.port || 80);
+			const res = await fetch(`${panelBase()}/api/work?port=${port}`, { cache: "no-store" });
 			const data = await res.json().catch(() => ({}));
 			if (data.error) throw new Error(data.error);
 			return data;

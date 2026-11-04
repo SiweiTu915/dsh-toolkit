@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
 // 工作项台账:面板只读它 + 提供"关闭"一个动作,判定逻辑仍在 dsh-work 插件里。
 import { loadItems, loadLive, pendingItems, append } from "../plugins/dsh-work/lib/ledger.mjs";
+import { visibleTo } from "../plugins/dsh-work/lib/ledger.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
 import { readWorkbenchRoots, machineRoots, fencePath, describeScope, toRemoteUnder } from "./lib/scope.mjs";
 import { readEndpoint, planRepoint, applyRepoint } from "./lib/repoint.mjs";
@@ -513,11 +514,16 @@ const server = createServer(async (req, res) => {
     // ── 工作项(侧栏「需要你」用)────────────────────────────────────────────
     if (url.pathname === "/api/work" && req.method === "GET") {
       try {
-        const all = loadItems();
+        // 按调用方所在的工作台隔离:侧栏会带 ?port=<自己端口>,
+        // 面板把它映射成 servers.json 里的名字(主 GUI 没有条目 → main)。
+        const port = Number(url.searchParams.get("port")) || 0;
+        const instance = port ? (loadServers().find((s) => Number(s.dshPort) === port)?.name ?? "main") : "main";
+        const all = loadItems({ instance: undefined }).filter((item) => visibleTo(item, instance));
         send(200, {
-          pending: pendingItems(),
-          running: loadLive().jobs,
-          liveCheckedAt: loadLive().checkedAt,
+          instance,
+          pending: pendingItems({ instance }),
+          running: loadLive({ instance }).jobs,
+          liveCheckedAt: loadLive({ instance }).checkedAt,
           closed: all.filter((item) => item.closed).length,
           total: all.length,
         });

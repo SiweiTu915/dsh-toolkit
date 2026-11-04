@@ -16,7 +16,16 @@ import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { advise, append, formatItem, loadItems, loadLive, pendingItems, renderRunning } from "./ledger.mjs";
+import {
+  advise,
+  append,
+  formatItem,
+  instanceName,
+  loadItems,
+  loadLive,
+  pendingItems,
+  renderRunning,
+} from "./ledger.mjs";
 
 export const name = "dsh-work";
 export const inject = ["tools", "systemPrompt"];
@@ -199,9 +208,10 @@ export function apply(ctx) {
         try {
           const sections = [];
           // **在跑**放前面:新会话开始时,人/模型最需要知道的是"有没有事正在进行"
-          const running = renderRunning(loadLive(), 4);
+          const me = instanceName();
+          const running = renderRunning(loadLive({ instance: me }), 4);
           if (running) sections.push(`正在跑的作业（实时快照，由 launchd 每 60s 刷新）：\n${running}`);
-          const items = pendingItems();
+          const items = pendingItems({ instance: me });
           if (items.length > 0) {
             const lines = items.slice(0, 5).map((item) => `- ${item.state} · ${item.summary}`);
             const more = items.length > 5 ? `\n（另有 ${items.length - 5} 条，用 work 工具 action="list" 看）` : "";
@@ -232,26 +242,27 @@ export function apply(ctx) {
             const id = String(args.id ?? "").trim();
             try {
               if (action === "list") {
-                const items = loadItems().filter((item) => !item.closed);
-                const live = renderRunning(loadLive(), 10);
+                const me = instanceName();
+                const items = loadItems({ instance: me }).filter((item) => !item.closed);
+                const live = renderRunning(loadLive({ instance: me }), 10);
                 const parts = [];
                 if (live) parts.push(`在跑：\n${live}`);
                 if (items.length > 0) parts.push(`等你处理：\n${items.map(formatItem).join("\n\n")}`);
                 return { ok: true, message: parts.length ? parts.join("\n\n") : "没有在跑的任务，也没有未关闭的工作项。" };
               }
               if (action === "show") {
-                const item = loadItems().find((entry) => entry.id === id);
+                const item = loadItems({ instance: instanceName() }).find((entry) => entry.id === id);
                 if (!item) return { ok: false, message: `没有 ${id}` };
                 return { ok: true, message: formatItem(item) };
               }
               if (action === "close") {
-                const item = loadItems().find((entry) => entry.id === id);
+                const item = loadItems({ instance: instanceName() }).find((entry) => entry.id === id);
                 if (!item) return { ok: false, message: `没有 ${id}` };
                 append({ op: "close", id: item.id, note: String(args.note ?? "") });
                 return { ok: true, message: `已关闭 ${item.id}` };
               }
               if (action === "judge") {
-                const item = loadItems().find((entry) => entry.id === id);
+                const item = loadItems({ instance: instanceName() }).find((entry) => entry.id === id);
                 if (!item) return { ok: false, message: `没有 ${id}` };
                 const text = await judgeItem(ctx, exec.agent, item, exec.signal);
                 append({ op: "judge", id: item.id, text });

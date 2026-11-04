@@ -19,6 +19,42 @@ export function ledgerPath() {
   return process.env.DSH_WORK_LEDGER ?? join(home, "workitems.jsonl");
 }
 
+/**
+ * 当前实例的归属名。
+ *
+ * 为什么需要：台账文件是**一份**（只有一个 launchd 在写），但主 GUI、各个工作台
+ * 实例（`sim-homes/<name>`）读的是同一份 —— 不隔离就会出现「别人的工作台也能看到
+ * 我的工作项」。所以每条记录带 `instance`，读的时候按自己的归属过滤：
+ *   · 自己实例的
+ *   · 标成 `global` 的（真的全局事项）
+ *   · 早期没带归属的（视为 global，兼容老数据）
+ *
+ * 归属名来源：显式 `DSH_WORK_INSTANCE` > `DSH_HOME` 里 `sim-homes/<name>` 的 <name> > `main`。
+ * @returns 实例名
+ */
+export function instanceName() {
+  const explicit = process.env.DSH_WORK_INSTANCE;
+  if (explicit) return explicit;
+  const home = (process.env.DSH_HOME ?? join(homedir(), ".dsh")).replace(/\/+$/u, "");
+  const hit = /\/sim-homes\/([^/]+)$/u.exec(home);
+  return hit ? hit[1] : "main";
+}
+
+/**
+ * 一条记录归谁。
+ * @returns 归属名（缺省或显式 global 都算 global）
+ */
+export function ownerOf(item) {
+  const owner = String(item?.instance ?? "").trim();
+  return owner === "" ? "global" : owner;
+}
+
+/** 这条记录对当前实例可见吗。 */
+export function visibleTo(item, instance = instanceName()) {
+  const owner = ownerOf(item);
+  return owner === "global" || owner === instance;
+}
+
 /** 追加一条事件。 */
 export function append(event) {
   const file = ledgerPath();
@@ -56,14 +92,18 @@ export function fold(text) {
 }
 
 /** 读全部工作项。 */
-export function loadItems() {
+export function loadItems({ instance } = {}) {
   const file = ledgerPath();
-  return fold(existsSync(file) ? readFileSync(file, "utf8") : "");
+  const all = fold(existsSync(file) ? readFileSync(file, "utf8") : "");
+  if (instance === undefined) return all; // 显式要全部（面板调试/迁移用）
+  return all.filter((item) => visibleTo(item, instance));
 }
 
 /** 未关闭且**在等人**的工作项。 */
-export function pendingItems() {
-  return loadItems().filter((item) => !item.closed && String(item.state ?? "").startsWith("person/"));
+export function pendingItems({ instance } = {}) {
+  return loadItems({ instance }).filter(
+    (item) => !item.closed && String(item.state ?? "").startsWith("person/"),
+  );
 }
 
 /** 人类可读的耗时。 */
@@ -160,12 +200,16 @@ export function livePath() {
 }
 
 /** 读在跑快照（没有就返回空壳）。 */
-export function loadLive() {
+export function loadLive({ instance } = {}) {
   const file = livePath();
   if (!existsSync(file)) return { checkedAt: null, jobs: [] };
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return { checkedAt: parsed.checkedAt ?? null, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] };
+    const jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
+    return {
+      checkedAt: parsed.checkedAt ?? null,
+      jobs: instance === undefined ? jobs : jobs.filter((job) => visibleTo(job, instance)),
+    };
   } catch {
     return { checkedAt: null, jobs: [] };
   }
@@ -184,7 +228,7 @@ export function loadLive() {
  * @returns 新的快照对象
  */
 export function updateLive(running, now = Date.now(), stallMs = 10 * 60 * 1000) {
-  const prev = new Map(loadLive().jobs.map((job) => [job.id, job]));
+  const prev = new Map(loadLive({ instance: undefined }).jobs.map((job) => [job.id, job]));
   const jobs = running.map((job) => {
     const before = prev.get(job.id);
     const bytes = Number(job.bytes) || 0;
@@ -194,6 +238,7 @@ export function updateLive(running, now = Date.now(), stallMs = 10 * 60 * 1000) 
     const startedMs = Date.parse(job.started ?? "");
     return {
       id: job.id,
+      instance: job.instance ?? "global",
       state: "running",
       started: job.started ?? null,
       elapsedMs: Number.isFinite(startedMs) ? now - startedMs : null,

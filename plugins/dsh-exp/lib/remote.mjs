@@ -65,7 +65,17 @@ export function resolveSsh() {
         if (!cfg?.sshTarget) continue;
         candidates.push({ cfg, file, at: statSync(file).mtimeMs });
       }
-      candidates.sort((left, right) => right.at - left.at);
+      // 优先「servers.json 里登记过的工作台」——sim-homes 下常有 dsh17-test 之类的
+      // 脚手架,它们和真工作台指向同一台机,但归属名不对(会把工作项记到错的门下)。
+      let known = [];
+      try {
+        const servers = readJson(join(homedir(), ".dsh", "dsh-remote", "servers.json"))?.servers ?? [];
+        known = servers.filter((s) => s?.name).map((s) => String(s.name));
+      } catch { /* 读不到就只按时间排 */ }
+      candidates.sort((left, right) => {
+        const rank = (item) => (known.some((name) => item.file.includes(`/sim-homes/${name}/`)) ? 0 : 1);
+        return rank(left) - rank(right) || right.at - left.at;
+      });
       const best = candidates[0];
       if (best) {
         return {

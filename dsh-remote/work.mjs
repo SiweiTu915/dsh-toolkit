@@ -40,6 +40,22 @@ const DSH_HOME = process.env.DSH_HOME ?? join(homedir(), ".dsh");
 const SNAPSHOT = join(DSH_HOME, ".state", "exp-watch.json");
 /** 多久没有新输出算「疑似卡住」（分钟）。 */
 const STALL_MIN = Number(process.env.DSH_WORK_STALL_MIN) || 10;
+
+/**
+ * 从 ssh 配置的来源路径推断「这批工作项归哪个工作台」。
+ *
+ * 监控器跑在主 home(launchd 只起一份),所以不能按自己的 DSH_HOME 判;
+ * 它监控谁(哪台工作台的 remote-mount.json),工作项就归谁。
+ * @param source - resolveSsh().source,形如 .../sim-homes/<name>/remote-mount.json
+ * @returns 工作台名;推不出来就 global(真的全局)
+ */
+export function instanceFromSource(source) {
+  const explicit = process.env.DSH_WORK_INSTANCE;
+  if (explicit) return explicit;
+  const hit = /\/sim-homes\/([^/]+)\//u.exec(String(source ?? ""));
+  return hit ? hit[1] : "global";
+}
+
 const ENDED = new Set(["done", "fail", "ended"]);
 
 /* ------------------------------ 结束态快照 ------------------------------ */
@@ -72,11 +88,12 @@ async function scanExp() {
   if (!existsSync(remotePath) || !existsSync(cmdsPath)) {
     throw new Error("找不到 dsh-exp 的 remote.mjs / cmds.mjs（实验插件没装？）");
   }
-  const { runRemote } = await import(remotePath);
+  const { runRemote, resolveSsh } = await import(remotePath);
   const { listScript, statusScript, parseList, parseStatus } = await import(cmdsPath);
 
   const listOut = await runRemote(listScript(), { timeoutMs: 60000 });
   const jobs = parseList(listOut.stdout ?? "");
+  const instance = instanceFromSource(resolveSsh()?.source);
 
   const detailed = [];
   for (const job of jobs) {
@@ -89,6 +106,7 @@ async function scanExp() {
     }
     detailed.push({
       id: job.id,
+      instance,
       state: status?.state ?? job.state ?? "unknown",
       exit: status?.exit ?? (job.exit === undefined ? "-" : String(job.exit)),
       started: status?.started ?? job.started,
@@ -101,7 +119,7 @@ async function scanExp() {
       })(),
     });
   }
-  return detailed;
+  return { jobs: detailed, instance };
 }
 
 /* --------------------------------- 一轮 --------------------------------- */
@@ -111,7 +129,7 @@ async function scanExp() {
  * @returns 本轮新增的工作项
  */
 export async function scanOnce({ quiet = false } = {}) {
-  const jobs = await scanExp();
+  const { jobs, instance } = await scanExp();
   const snapshot = loadSnapshot();
   const fresh = [];
   const running = [];
@@ -134,6 +152,7 @@ export async function scanOnce({ quiet = false } = {}) {
       op: "add",
       id,
       kind: "exp",
+      instance,
       subject: job.id,
       state: verdict.state,
       waiting: verdict.waiting,
