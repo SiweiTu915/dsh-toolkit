@@ -161,27 +161,29 @@ const DESCRIPTION = [
   "工作项由 dsh-remote/work.mjs 在作业结束时自动写入，这里只负责看和判断。",
 ].join("");
 
+// 0.2.1 的 defineTool 用的是“作者 schema”：
+// · parameters 是一张**属性表**（不是 JSON Schema 的 {type,properties}），
+//   required 写在属性上（required: true）；
+// · output.schema 是**单个值 schema**，对象节点必须显式写 additionalProperties。
 const PARAMETERS = {
-  type: "object",
-  properties: {
-    action: {
-      type: "string",
-      enum: ["list", "show", "close", "judge"],
-      description: "list=列未关闭的；show=看一条；close=关掉；judge=让模型读日志给判断",
-    },
-    id: { type: "string", description: "工作项 id（show/close/judge 需要）" },
-    note: { type: "string", description: "close 时的备注" },
+  action: {
+    type: "string",
+    enum: ["list", "show", "close", "judge"],
+    description: "list=列未关闭的；show=看一条；close=关掉；judge=让模型读日志给判断",
+    required: true,
   },
-  required: ["action"],
-  additionalProperties: false,
+  id: { type: "string", description: "工作项 id（show/close/judge 需要）" },
+  note: { type: "string", description: "close 时的备注" },
 };
 
 const OUTPUT = {
   schema: {
     type: "object",
-    properties: { ok: { type: "boolean" }, message: { type: "string" } },
-    required: ["ok", "message"],
     additionalProperties: false,
+    properties: {
+      ok: { type: "boolean", required: true },
+      message: { type: "string", required: true },
+    },
   },
   render: (_args, value) => [{ type: "text", text: String(value?.message ?? "") }],
 };
