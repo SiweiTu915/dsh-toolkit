@@ -201,7 +201,8 @@ export function updateLive(running, now = Date.now(), stallMs = 10 * 60 * 1000) 
       lastChangeAt,
       quietMs: now - lastChangeAt,
       stalled: now - lastChangeAt > stallMs,
-      lastLine: String(job.lastLine ?? "").slice(0, 160),
+      lastLine: String(job.lastLine ?? job.logTail ?? "").slice(0, 160),
+      progress: parseProgress(job.logTail ?? ""),
     };
   });
   return { checkedAt: new Date(now).toISOString(), jobs };
@@ -238,9 +239,55 @@ export function renderRunning(snapshot, limit = 4) {
       job.id,
       job.bytes < 1024 ? `日志 ${job.bytes}B` : `日志 ${(job.bytes / 1024).toFixed(job.bytes > 102400 ? 0 : 1)}KB`,
     ];
+    if (job.progress) parts.push(progressBar(job.progress));
     if (job.stalled) parts.push(`⚠ ${humanMs(job.quietMs)} 无新输出，疑似卡住`);
     else if (job.quietMs > 60000) parts.push(`${humanMs(job.quietMs)} 无新输出`);
     if (job.lastLine) parts.push(`末行：${job.lastLine}`);
     return `- ${parts.join(" · ")}`;
   }).join("\n");
+}
+
+/* ------------------------------- 进度解析 ------------------------------- */
+
+/**
+ * 从日志尾部猜进度。
+ *
+ * 为什么只能"猜":通用 shell 作业没有结构化进度,能有百分比的前提是**作业自己
+ * 报了总量**。所以认这几种常见写法(不猜格式、只认明确的 `x/y`):
+ *   · `epoch 17/30` / `Epoch 17/30`      —— 训练循环最常见
+ *   · `PROGRESS 17/30` / `progress=17/30` —— 显式约定,推荐用这个
+ *   · `[17/30]` / `step 17/30`           —— tqdm 风格
+ * 都匹配不到就返回 undefined —— **绝不编一个假进度**。
+ *
+ * @param logText - 日志文本(取尾部即可)。
+ * @returns {{ done: number, total: number, pct: number, label: string } | undefined}
+ */
+export function parseProgress(logText) {
+  const text = String(logText ?? "");
+  const patterns = [
+    /PROGRESS[\s:=]+(\d+)\s*\/\s*(\d+)/iu,
+    /epoch[\s:=]+(\d+)\s*\/\s*(\d+)/iu,
+    /step[\s:=]+(\d+)\s*\/\s*(\d+)/iu,
+    /\[(\d+)\s*\/\s*(\d+)\]/u,
+  ];
+  // 从**后往前**找:最新的进度才有意义(日志前面可能还是 1/30)
+  const lines = text.split("\n").filter((line) => line.trim());
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    for (const pattern of patterns) {
+      const hit = pattern.exec(lines[i]);
+      if (!hit) continue;
+      const done = Number(hit[1]);
+      const total = Number(hit[2]);
+      if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0 || done > total) continue;
+      return { done, total, pct: Math.round((done / total) * 100), label: lines[i].trim().slice(0, 100) };
+    }
+  }
+  return undefined;
+}
+
+/** 画一个纯文本进度条(给终端/提示注入用,不依赖 UI)。 */
+export function progressBar(progress, width = 12) {
+  if (!progress) return "";
+  const filled = Math.max(0, Math.min(width, Math.round((progress.pct / 100) * width)));
+  return `${"█".repeat(filled)}${"░".repeat(width - filled)} ${progress.done}/${progress.total} (${progress.pct}%)`;
 }

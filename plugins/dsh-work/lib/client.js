@@ -43,6 +43,10 @@ window.__ModuleLoader__.load({
 			runningMeta: { opacity: 0.7, flex: "none" },
 			runningId: { fontFamily: "ui-monospace, monospace", fontSize: 11, opacity: 0.9 },
 			stalledTag: { color: "#b9770e", fontWeight: 600 },
+			barTrack: { height: 4, borderRadius: 2, background: "var(--dsh-border, #ececec)", margin: "4px 0 2px", overflow: "hidden" },
+			barFill: { height: 4, background: "#2e9e5b", borderRadius: 2 },
+			barRow: { padding: "0 10px 6px" },
+			pctText: { fontSize: 11, opacity: 0.7 },
 		};
 
 		/** 毫秒 → 可读时长。 */
@@ -126,13 +130,24 @@ window.__ModuleLoader__.load({
 					running.length > 0
 						? h("div", null,
 							h("div", { style: { fontSize: 11, fontWeight: 600, opacity: 0.6, padding: "2px 0 6px" } }, `在跑（${running.length}）`),
-							running.map((job) => h("div", { key: job.id, style: S.runningCard },
+							running.map((job) => h("div", { key: job.id, style: { marginBottom: 6 } },
+								h("div", { key: "row", style: S.runningCard },
 								h("span", { style: job.stalled ? S.dotStalled : S.dot }),
 								h("span", { style: S.runningMeta }, humanMs(job.elapsedMs)),
 								h("span", { style: S.runningId }, job.id),
-								job.stalled
-									? h("span", { style: S.stalledTag }, `⚠ ${humanMs(job.quietMs)} 无新输出`)
-									: h("span", { style: S.runningMeta }, job.quietMs > 60000 ? `${humanMs(job.quietMs)} 无输出` : "有输出"),
+									job.stalled
+										? h("span", { style: S.stalledTag }, `⚠ ${humanMs(job.quietMs)} 无新输出`)
+										: h("span", { style: S.runningMeta }, job.quietMs > 60000 ? `${humanMs(job.quietMs)} 无输出` : "有输出"),
+								),
+								// 有分母才画条:作业自己报 PROGRESS/epoch 才有,不编假进度
+								job.progress
+									? h("div", { key: "bar", style: S.barRow },
+										h("div", { style: S.barTrack },
+											h("div", { style: { ...S.barFill, width: `${job.progress.pct}%` } }),
+										),
+										h("div", { style: S.pctText }, `${job.progress.done}/${job.progress.total} · ${job.progress.pct}%`),
+									)
+									: null,
 							)),
 							h("div", { style: { height: 10 } }),
 						)

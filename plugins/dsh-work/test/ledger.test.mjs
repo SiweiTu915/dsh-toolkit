@@ -7,7 +7,7 @@ import { join } from "node:path";
 // 台账路径依赖 DSH_WORK_LEDGER，必须在 import 之前设好
 process.env.DSH_WORK_LEDGER = join(mkdtempSync(join(tmpdir(), "dsh-work-")), "workitems.jsonl");
 
-const { advise, append, fold, formatItem, loadItems, pendingItems } = await import("../lib/ledger.mjs");
+const { advise, append, fold, formatItem, loadItems, parseProgress, pendingItems, progressBar } = await import("../lib/ledger.mjs");
 
 test("fold：add/close/judge 三种事件折叠成当前视图", () => {
   const text = [
@@ -93,4 +93,21 @@ test("advise：真正在跑才标 working", () => {
   const v = advise({ id: "j10", state: "running" });
   assert.equal(v.state, "working");
   assert.match(v.summary, /仍在运行/u);
+});
+
+test("parseProgress：认 epoch / PROGRESS / [x/y]，取最新一行", () => {
+  assert.deepEqual(parseProgress("epoch 1/30\nepoch 17/30 loss=0.3"), { done: 17, total: 30, pct: 57, label: "epoch 17/30 loss=0.3" });
+  assert.equal(parseProgress("PROGRESS 5/10")?.pct, 50);
+  assert.equal(parseProgress("[3/8] step")?.done, 3);
+});
+
+test("parseProgress：没有明确 x/y 就不给进度（不编）", () => {
+  assert.equal(parseProgress("loss=0.31\nstill training..."), undefined);
+  assert.equal(parseProgress("epoch 40/30"), undefined, "done > total 视为无效");
+  assert.equal(parseProgress(""), undefined);
+});
+
+test("progressBar：有分母才画条", () => {
+  assert.match(progressBar({ done: 5, total: 10, pct: 50 }), /5\/10 \(50%\)/u);
+  assert.equal(progressBar(undefined), "");
 });

@@ -30,6 +30,7 @@ import {
   humanMs,
   loadItems,
   loadLive,
+  progressBar,
   renderRunning,
   saveLive,
   updateLive,
@@ -196,6 +197,7 @@ async function main(argv) {
         : `${humanMs(job.quietMs)} 无新输出`;
       const size = job.bytes < 1024 ? `${job.bytes}B` : `${(job.bytes / 1024).toFixed(1)}KB`;
       console.log(`  ${job.id} · 已跑 ${humanMs(job.elapsedMs)} · 日志 ${size} · ${quiet}`);
+      if (job.progress) console.log(`      进度 ${progressBar(job.progress)}`);
       if (job.lastLine) console.log(`      末行：${job.lastLine}`);
     }
     return 0;
