@@ -9,7 +9,7 @@
  *     下一步"。规则不烧钱、不会编，模型只负责它擅长的部分。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -129,4 +129,103 @@ export function formatItem(item) {
   if (item.judgment) lines.push(...String(item.judgment).split("\n").map((line) => `    ★ ${line}`));
   if (item.note) lines.push(`    备注: ${item.note}`);
   return lines.join("\n");
+}
+
+/* ------------------------------- 在跑视图 ------------------------------- */
+
+/**
+ * 在跑任务的快照文件。
+ *
+ * 为什么要单独一份：台账记的是「已经结束、等人处理」的事；而「还在跑」是
+ * **每 60 秒都在变**的活数据，写进台账会把它灌满事件。分开存，读的时候合并。
+ */
+export function livePath() {
+  const home = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+  return process.env.DSH_WORK_LIVE ?? join(home, "work-live.json");
+}
+
+/** 读在跑快照（没有就返回空壳）。 */
+export function loadLive() {
+  const file = livePath();
+  if (!existsSync(file)) return { checkedAt: null, jobs: [] };
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return { checkedAt: parsed.checkedAt ?? null, jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [] };
+  } catch {
+    return { checkedAt: null, jobs: [] };
+  }
+}
+
+/**
+ * 用本轮扫描结果更新在跑快照，并算出「多久没有新输出」。
+ *
+ * 卡住判定：进程还活着，但日志字节数 **超过阈值时间没变**。
+ * 这是最便宜、又最能抓住「跑了两小时其实早挂了」的信号 —— 不依赖 GPU 指标
+ * （那台机可能是无卡开机），也不依赖模型判断。
+ *
+ * @param running - 本轮看到的在跑作业 [{ id, started, bytes, lastLine, finished? }]
+ * @param now - 当前时间戳（毫秒，测试可注入）
+ * @param stallMs - 多久无新输出算卡住
+ * @returns 新的快照对象
+ */
+export function updateLive(running, now = Date.now(), stallMs = 10 * 60 * 1000) {
+  const prev = new Map(loadLive().jobs.map((job) => [job.id, job]));
+  const jobs = running.map((job) => {
+    const before = prev.get(job.id);
+    const bytes = Number(job.bytes) || 0;
+    // 字节数变了 = 有新输出；首次见到就记成现在（不给它凭空算出一个"已停滞"
+    const changed = before === undefined || before.bytes !== bytes;
+    const lastChangeAt = changed ? now : (before.lastChangeAt ?? now);
+    const startedMs = Date.parse(job.started ?? "");
+    return {
+      id: job.id,
+      state: "running",
+      started: job.started ?? null,
+      elapsedMs: Number.isFinite(startedMs) ? now - startedMs : null,
+      bytes,
+      lastChangeAt,
+      quietMs: now - lastChangeAt,
+      stalled: now - lastChangeAt > stallMs,
+      lastLine: String(job.lastLine ?? "").slice(0, 160),
+    };
+  });
+  return { checkedAt: new Date(now).toISOString(), jobs };
+}
+
+/** 把快照写盘（原子写：tmp + rename，别让读者看到半个文件）。 */
+export function saveLive(snapshot) {
+  const file = livePath();
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(snapshot, null, 2), "utf8");
+  renameSync(tmp, file);
+}
+
+/** 人类可读的时长。 */
+export function humanMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "?";
+  const min = Math.round(ms / 60000);
+  if (min < 1) return "<1m";
+  return min >= 60 ? `${Math.floor(min / 60)}h${min % 60}m` : `${min}m`;
+}
+
+/**
+ * 把在跑任务渲染成**给模型看**的一行行文本（模型和人看到的是同一份数据）。
+ * @param snapshot - loadLive/updateLive 的结果。
+ * @param limit - 最多几行。
+ */
+export function renderRunning(snapshot, limit = 4) {
+  const jobs = (snapshot?.jobs ?? []).slice(0, limit);
+  if (jobs.length === 0) return "";
+  return jobs.map((job) => {
+    const parts = [
+      `在跑 ${humanMs(job.elapsedMs)}`,
+      job.id,
+      job.bytes < 1024 ? `日志 ${job.bytes}B` : `日志 ${(job.bytes / 1024).toFixed(job.bytes > 102400 ? 0 : 1)}KB`,
+    ];
+    if (job.stalled) parts.push(`⚠ ${humanMs(job.quietMs)} 无新输出，疑似卡住`);
+    else if (job.quietMs > 60000) parts.push(`${humanMs(job.quietMs)} 无新输出`);
+    if (job.lastLine) parts.push(`末行：${job.lastLine}`);
+    return `- ${parts.join(" · ")}`;
+  }).join("\n");
 }

@@ -37,7 +37,21 @@ window.__ModuleLoader__.load({
 			judge: { marginTop: 6, fontSize: 12, whiteSpace: "pre-wrap", borderLeft: "2px solid #7aa2f7", paddingLeft: 8 },
 			empty: { padding: 16, opacity: 0.7, lineHeight: 1.6 },
 			err: { color: "#c0392b", padding: "8px 10px", fontSize: 12, whiteSpace: "pre-wrap" },
+			runningCard: { display: "flex", alignItems: "baseline", gap: 6, padding: "6px 10px", borderBottom: "1px solid var(--dsh-border, #f0f0f0)", fontSize: 12 },
+			dot: { width: 7, height: 7, borderRadius: 4, background: "#2e9e5b", flex: "none" },
+			dotStalled: { width: 7, height: 7, borderRadius: 4, background: "#d38b00", flex: "none" },
+			runningMeta: { opacity: 0.7, flex: "none" },
+			runningId: { fontFamily: "ui-monospace, monospace", fontSize: 11, opacity: 0.9 },
+			stalledTag: { color: "#b9770e", fontWeight: 600 },
 		};
+
+		/** 毫秒 → 可读时长。 */
+		function humanMs(ms) {
+			if (typeof ms !== "number" || !isFinite(ms) || ms < 0) return "?";
+			const min = Math.round(ms / 60000);
+			if (min < 1) return "<1m";
+			return min >= 60 ? Math.floor(min / 60) + "h" + (min % 60) + "m" : min + "m";
+		}
 
 		/** 拉一次台账。 */
 		async function fetchWork() {
@@ -98,14 +112,31 @@ window.__ModuleLoader__.load({
 			};
 
 			const pending = data.pending ?? [];
+			const running = data.running ?? [];
 
 			return h("div", { style: S.wrap },
 				h("div", { style: S.bar },
-					h("span", { style: S.count }, pending.length === 0 ? "没有待处理项" : `${pending.length} 项在等你`),
+					h("span", { style: S.count },
+						[running.length ? `${running.length} 个在跑` : null, pending.length ? `${pending.length} 项在等你` : null]
+							.filter(Boolean).join(" · ") || "没有在跑，也没有待处理项"),
 					h("button", { style: S.btn, disabled: busy, onClick: load }, "刷新"),
 				),
 				error ? h("div", { style: S.err }, `面板不可达：${error}\n（dsh-remote 面板没起？在 ~/.dsh/dsh-remote 里 launchctl kickstart 一下）`) : null,
 				h("div", { style: S.list },
+					running.length > 0
+						? h("div", null,
+							h("div", { style: { fontSize: 11, fontWeight: 600, opacity: 0.6, padding: "2px 0 6px" } }, `在跑（${running.length}）`),
+							running.map((job) => h("div", { key: job.id, style: S.runningCard },
+								h("span", { style: job.stalled ? S.dotStalled : S.dot }),
+								h("span", { style: S.runningMeta }, humanMs(job.elapsedMs)),
+								h("span", { style: S.runningId }, job.id),
+								job.stalled
+									? h("span", { style: S.stalledTag }, `⚠ ${humanMs(job.quietMs)} 无新输出`)
+									: h("span", { style: S.runningMeta }, job.quietMs > 60000 ? `${humanMs(job.quietMs)} 无输出` : "有输出"),
+							)),
+							h("div", { style: { height: 10 } }),
+						)
+						: null,
 					pending.length === 0
 						? h("div", { style: S.empty },
 							"这里只显示**需要你动手**的事：\n\n",

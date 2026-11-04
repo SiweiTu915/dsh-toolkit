@@ -16,7 +16,7 @@ import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { advise, append, formatItem, loadItems, pendingItems } from "./ledger.mjs";
+import { advise, append, formatItem, loadItems, loadLive, pendingItems, renderRunning } from "./ledger.mjs";
 
 export const name = "dsh-work";
 export const inject = ["tools", "systemPrompt"];
@@ -197,11 +197,17 @@ export function apply(ctx) {
       interpolate: false,
       text: () => {
         try {
+          const sections = [];
+          // **在跑**放前面:新会话开始时,人/模型最需要知道的是"有没有事正在进行"
+          const running = renderRunning(loadLive(), 4);
+          if (running) sections.push(`正在跑的作业（实时快照，由 launchd 每 60s 刷新）：\n${running}`);
           const items = pendingItems();
-          if (items.length === 0) return "";
-          const lines = items.slice(0, 5).map((item) => `- ${item.state} · ${item.summary}`);
-          const more = items.length > 5 ? `\n（另有 ${items.length - 5} 条，用 work 工具 action="list" 看）` : "";
-          return `待你处理的工作项 ${items.length} 条（用 work 工具处理）：\n${lines.join("\n")}${more}`;
+          if (items.length > 0) {
+            const lines = items.slice(0, 5).map((item) => `- ${item.state} · ${item.summary}`);
+            const more = items.length > 5 ? `\n（另有 ${items.length - 5} 条，用 work 工具 action="list" 看）` : "";
+            sections.push(`待你处理的工作项 ${items.length} 条（用 work 工具处理）：\n${lines.join("\n")}${more}`);
+          }
+          return sections.join("\n\n");
         } catch {
           return ""; // 台账坏了不能拖垮会话
         }
@@ -227,8 +233,11 @@ export function apply(ctx) {
             try {
               if (action === "list") {
                 const items = loadItems().filter((item) => !item.closed);
-                if (items.length === 0) return { ok: true, message: "没有未关闭的工作项。" };
-                return { ok: true, message: items.map(formatItem).join("\n\n") };
+                const live = renderRunning(loadLive(), 10);
+                const parts = [];
+                if (live) parts.push(`在跑：\n${live}`);
+                if (items.length > 0) parts.push(`等你处理：\n${items.map(formatItem).join("\n\n")}`);
+                return { ok: true, message: parts.length ? parts.join("\n\n") : "没有在跑的任务，也没有未关闭的工作项。" };
               }
               if (action === "show") {
                 const item = loadItems().find((entry) => entry.id === id);

@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { connect as sftpConnect } from "./lib/sftp.mjs";
 // 工作项台账:面板只读它 + 提供"关闭"一个动作,判定逻辑仍在 dsh-work 插件里。
-import { loadItems, pendingItems, append } from "../plugins/dsh-work/lib/ledger.mjs";
+import { loadItems, loadLive, pendingItems, append } from "../plugins/dsh-work/lib/ledger.mjs";
 import { resolveConn, DSH_HOME } from "./lib/hosts.mjs";
 import { readWorkbenchRoots, machineRoots, fencePath, describeScope, toRemoteUnder } from "./lib/scope.mjs";
 import { readEndpoint, planRepoint, applyRepoint } from "./lib/repoint.mjs";
@@ -516,6 +516,8 @@ const server = createServer(async (req, res) => {
         const all = loadItems();
         send(200, {
           pending: pendingItems(),
+          running: loadLive().jobs,
+          liveCheckedAt: loadLive().checkedAt,
           closed: all.filter((item) => item.closed).length,
           total: all.length,
         });
