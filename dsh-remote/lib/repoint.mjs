@@ -9,7 +9,7 @@
 // (/api/endpoint)都调它,免得两处逻辑漂移。
 import { copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 export const DEFAULT_REMOTE_DIR =
   process.env.DSH_REMOTE_DIR || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-remote')
@@ -266,4 +266,75 @@ export function applyRepoint({
   }
 
   return { ok: true, plan, applied, skipped, backups, stamp, dryRun }
+}
+
+/* ---------------------------------- 回滚 ---------------------------------- */
+
+/** repoint 会改到的所有文件（用于找备份）。 */
+function candidateFiles({ remoteDir = DEFAULT_REMOTE_DIR, sshConfigFile = SSH_CONFIG_FILE } = {}) {
+  const files = [join(remoteDir, 'servers.json')];
+  const sims = join(remoteDir, 'sim-homes');
+  if (existsSync(sims)) {
+    for (const entry of readdirSync(sims, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      files.push(join(sims, entry.name, 'remote-mount.json'));
+    }
+  }
+  files.push(sshConfigFile);
+  return files;
+}
+
+/**
+ * 列出所有 repoint 备份。
+ * @returns {{file:string, backup:string, stamp:string}[]} 按 stamp 倒序（新的在前）
+ */
+export function listRepointBackups(opts = {}) {
+  const rows = [];
+  for (const file of candidateFiles(opts)) {
+    const dir = dirname(file);
+    const base = basename(file);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      const prefix = `${base}.bak-`;
+      if (!entry.startsWith(prefix)) continue;
+      rows.push({ file, backup: join(dir, entry), stamp: entry.slice(prefix.length) });
+    }
+  }
+  return rows.sort((a, b) => (a.stamp < b.stamp ? 1 : a.stamp > b.stamp ? -1 : 0));
+}
+
+/**
+ * 回滚到某一批备份。
+ *
+ * 为什么需要：repoint 已经在写盘前自动备份（`*.bak-<stamp>`），但只能手动去
+ * 找文件拷回来 —— 换端点换错了想撤，人得先认得那串时间戳。这里把"撤"变成一条命令。
+ *
+ * @param params.stamp - 目标备份批次；省略则用最新一批。
+ * @param params.dryRun - true 只预览（默认 true：回滚是破坏性操作，必须显式确认）。
+ * @returns {{ok:boolean, error?:string, stamp?:string, restored:string[], skipped:string[], saved?:string[]}}
+ */
+export function undoRepoint({ stamp, dryRun = true, remoteDir = DEFAULT_REMOTE_DIR, sshConfigFile = SSH_CONFIG_FILE } = {}) {
+  const all = listRepointBackups({ remoteDir, sshConfigFile });
+  if (all.length === 0) return { ok: false, error: '没有找到任何 repoint 备份', restored: [], skipped: [] };
+  const target = stamp ?? all[0].stamp;
+  const batch = all.filter((row) => row.stamp === target);
+  if (batch.length === 0) return { ok: false, error: `没有 ${target} 这一批备份`, restored: [], skipped: [] };
+
+  const restored = [];
+  const skipped = [];
+  const saved = [];
+  const now = new Date().toISOString().replace(/[:.]/g, '-');
+  for (const row of batch) {
+    if (!existsSync(row.backup)) { skipped.push(row.file); continue; }
+    restored.push(row.file);
+    if (dryRun) continue;
+    // 回滚本身也可能回错，先把"当前状态"存一份，保证还能再回滚回来
+    if (existsSync(row.file)) {
+      const keep = `${row.file}.pre-undo-${now}`;
+      copyFileSync(row.file, keep);
+      saved.push(keep);
+    }
+    copyFileSync(row.backup, row.file);
+  }
+  return { ok: true, stamp: target, restored, skipped, saved };
 }

@@ -21,10 +21,11 @@
  *   node repoint.mjs <机器名> --host <新主机> --port <新端口> --dry-run
  *   node repoint.mjs <机器名> --host <新主机> --port <新端口> --ssh-config
  *   node repoint.mjs <机器名> --show          # 只看当前端点与一致性,不改任何东西
+ *   node repoint.mjs --undo [--stamp <批次>] [--yes]   # 回滚到某批备份(默认只预览)
  *
  * 改完记得重启受影响的分区实例(面板上「断开」再「连接」)。
  */
-import { DEFAULT_REMOTE_DIR, SSH_CONFIG_FILE, planRepoint, applyRepoint, readEndpoint } from './lib/repoint.mjs'
+import { DEFAULT_REMOTE_DIR, SSH_CONFIG_FILE, planRepoint, applyRepoint, readEndpoint, listRepointBackups, undoRepoint } from './lib/repoint.mjs'
 
 function die(msg) { console.error(`✗ ${msg}`); process.exit(1) }
 
@@ -32,8 +33,33 @@ const argv = process.argv.slice(2)
 const flag = (name) => argv.includes(name)
 const opt = (name) => { const i = argv.indexOf(name); return i === -1 ? undefined : argv[i + 1] }
 const name = argv[0]
-if (!name || name.startsWith('--')) {
+// --undo 不需要机器名:它是按备份批次还原,先放行
+if (!name || (name.startsWith('--') && !flag('--undo'))) {
   die('用法: node repoint.mjs <机器名> --host <主机> --port <端口> [--user root] [--dry-run] [--ssh-config] | --show')
+}
+
+// ── --undo:回滚到某批备份(默认只预览,加 --yes 才写) ──────────────────────
+if (flag('--undo')) {
+  const stamp = opt('--stamp')
+  const rows = listRepointBackups()
+  if (rows.length === 0) die('没有找到任何 repoint 备份')
+  const target = stamp ?? rows[0].stamp
+  const preview = undoRepoint({ stamp: target, dryRun: true })
+  if (!preview.ok) die(preview.error)
+  console.log(`批次 ${target}（共 ${rows.filter((r) => r.stamp === target).length} 个备份）`)
+  for (const file of preview.restored) console.log(`  将还原  ${file.replace(process.env.HOME ?? '', '~')}`)
+  if (!flag('--yes')) {
+    console.log()
+    console.log('（预览。确认无误后加 --yes 真正回滚；回滚前会把当前状态另存为 *.pre-undo-<时间>）')
+    process.exit(0)
+  }
+  const done = undoRepoint({ stamp: target, dryRun: false })
+  if (!done.ok) die(done.error)
+  console.log()
+  console.log(`✓ 已还原 ${done.restored.length} 个文件`)
+  if (done.saved?.length) console.log(`  回滚前的状态已另存: ${done.saved.length} 个 (*.pre-undo-*)`)
+  console.log('  下一步:在面板上把受影响的分区「断开」再「连接」')
+  process.exit(0)
 }
 
 // ── --show:只看现状 ────────────────────────────────────────────────────────

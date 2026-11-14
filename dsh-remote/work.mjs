@@ -31,6 +31,7 @@ import {
   loadItems,
   loadLive,
   progressBar,
+  renderMarkdown,
   renderRunning,
   saveLive,
   updateLive,
@@ -222,6 +223,24 @@ async function main(argv) {
     return 0;
   }
 
+  if (cmd === "export") {
+    // 论文附录/周报用:把台账 + 在跑导成 Markdown
+    const out = flag("out");
+    const md = renderMarkdown({
+      items: loadItems(),
+      live: loadLive(),
+      instance: typeof flag("instance") === "string" ? flag("instance") : "all",
+      generatedAt: new Date().toISOString(),
+    });
+    if (typeof out === "string") {
+      writeFileSync(out, md, "utf8");
+      console.log(`已写入 ${out}（${md.length} 字符）`);
+    } else {
+      process.stdout.write(md);
+    }
+    return 0;
+  }
+
   if (cmd === "list") {
     const items = loadItems().filter((item) => flag("all") || !item.closed);
     const live = loadLive();
@@ -268,12 +287,13 @@ async function main(argv) {
     return 0;
   }
 
-  console.log(`用法: node work.mjs <watch|live|list|show|close> [参数]
+  console.log(`用法: node work.mjs <watch|live|list|show|close|export> [参数]
   watch [--interval 60] [--once]   扫一轮：写工作项 + 刷新在跑快照
   live                             看现在有哪些在跑（含是否卡住）
   list [--all]                     在跑 + 等你处理的
   show <id|作业id>
-  close <id> [--note "..."]`);
+  close <id> [--note "..."]
+  export [--out <file.md>] [--instance <名称>]   导出台账为 Markdown(论文附录用)`);
   return cmd ? 1 : 0;
 }
 

@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // 台账路径依赖 DSH_WORK_LEDGER，必须在 import 之前设好
 process.env.DSH_WORK_LEDGER = join(mkdtempSync(join(tmpdir(), "dsh-work-")), "workitems.jsonl");
 
-const { advise, append, fold, formatItem, instanceName, loadItems, ownerOf, parseProgress, pendingItems, progressBar, visibleTo } = await import("../lib/ledger.mjs");
+/** 直接追加一条**没有版本字段**的记录（模拟老数据）。 */
+function appendOld(record) {
+  const line = JSON.stringify({ t: new Date().toISOString(), ...record });
+  const prev = readFileSync(process.env.DSH_WORK_LEDGER, "utf8");
+  writeFileSync(process.env.DSH_WORK_LEDGER, prev + line + "\n");
+}
+
+const { advise, append, fold, formatItem, instanceName, loadItems, ownerOf, parseProgress, LEDGER_VERSION, pendingItems, progressBar, refusedRecords, renderMarkdown, renderNotes, renderPending, upgradeRecord, visibleTo } = await import("../lib/ledger.mjs");
 
 test("fold：add/close/judge 三种事件折叠成当前视图", () => {
   const text = [
@@ -141,4 +148,113 @@ test("loadItems 带 instance 时只返回本实例与 global", () => {
   assert.ok(mine.includes("w-mine"));
   assert.ok(mine.includes("w-global"));
   assert.ok(!mine.includes("w-other"), "别人的工作项不能出现");
+});
+
+test("renderPending：新条完整提醒一次，旧条降级成一行计数", () => {
+  const items = [
+    { id: "w-1", state: "person/决策", summary: "第一条" },
+    { id: "w-2", state: "person/查看", summary: "第二条" },
+  ];
+  const first = renderPending(items, {});
+  assert.match(first.text, /第一条/u);
+  assert.match(first.text, /第二条/u);
+  assert.deepEqual(first.mark.sort(), ["w-1", "w-2"]);
+
+  // 第二轮：两条都提醒过了 → 不再重复整段
+  const announced = { "w-1": "t", "w-2": "t" };
+  const second = renderPending(items, announced);
+  assert.doesNotMatch(second.text, /第一条/u, "已提醒过的不再重复完整内容");
+  assert.match(second.text, /之前提醒过/u);
+  assert.equal(second.mark.length, 0);
+});
+
+test("renderPending：新条与旧条混在一起时，只完整提醒新的", () => {
+  const items = [
+    { id: "w-old", state: "person/决策", summary: "旧的" },
+    { id: "w-new", state: "person/决策", summary: "新的" },
+  ];
+  const { text, mark } = renderPending(items, { "w-old": "t" });
+  assert.match(text, /新的/u);
+  assert.doesNotMatch(text, /旧的/u);
+  assert.deepEqual(mark, ["w-new"]);
+});
+
+test("renderPending：空列表不产生任何文本", () => {
+  assert.deepEqual(renderPending([], {}), { text: "", mark: [] });
+});
+
+test("renderPending：超过 limit 时只提醒前几条并给出剩余计数", () => {
+  const items = Array.from({ length: 8 }, (_, i) => ({ id: `w-${i}`, state: "person/决策", summary: `第${i}条` }));
+  const { mark, text } = renderPending(items, {}, 5);
+  assert.equal(mark.length, 5);
+  assert.match(text, /另有 3 条新事项/u);
+});
+
+test("版本化：append 写入当前版本；老记录(无 v)按 v1 读", () => {
+  append({ op: "add", id: "w-v1", state: "person/决策", waiting: "你", summary: "新记录" });
+  const raw = readFileSync(process.env.DSH_WORK_LEDGER, "utf8").trim().split("\n").at(-1);
+  assert.equal(JSON.parse(raw).v, 1);
+  // 手工塞一条"老数据"(无 v)
+  appendOld({ op: "add", id: "w-old-v", state: "person/决策", waiting: "你", summary: "老记录" });
+  const ids = loadItems().map((i) => i.id);
+  assert.ok(ids.includes("w-old-v"), "没有版本字段的老记录应可读");
+});
+
+test("版本化：记录版本比本构建新时拒绝，不猜着读", () => {
+  const file = process.env.DSH_WORK_LEDGER;
+  const prev = readFileSync(file, "utf8");
+  writeFileSync(file, `${prev}${JSON.stringify({ v: 99, op: "add", id: "w-future", state: "person/决策", summary: "未来版本" })}\n`);
+  const ids = loadItems().map((i) => i.id);
+  assert.ok(!ids.includes("w-future"), "比本构建新的记录必须被拒绝");
+  assert.ok(refusedRecords() >= 1, "应记录拒绝计数");
+});
+
+test("upgradeRecord：无版本→v1；未来版本→null", () => {
+  assert.equal(upgradeRecord({ id: "x" }).v, 1);
+  assert.equal(upgradeRecord({ id: "x", v: LEDGER_VERSION }).v, LEDGER_VERSION);
+  assert.equal(upgradeRecord({ id: "x", v: LEDGER_VERSION + 1 }), null);
+});
+
+test("renderMarkdown：标题带归属，分「在跑/待处理/已关闭」三节", () => {
+  const md = renderMarkdown({
+    instance: "wb-a",
+    generatedAt: "2026-11-14T00:00:00Z",
+    live: { jobs: [{ id: "exp-1", elapsedMs: 90 * 60000, bytes: 2048, quietMs: 30000, stalled: false, progress: { done: 3, total: 10, pct: 30 } }] },
+    items: [
+      { id: "w-a", state: "person/决策", summary: "失败", advice: "先看日志", evidence: { job: "exp-1", exit: "3" } },
+      { id: "w-b", state: "person/查看", summary: "跑完", closed: true, note: "已处理" },
+    ],
+  });
+  assert.match(md, /^# 工作项台账 · wb-a/m);
+  assert.match(md, /## 在跑/u);
+  assert.match(md, /exp-1 \| 1h30m \| 2.0KB \| 3\/10 \(30%\)/u);
+  assert.match(md, /## 待处理/u);
+  assert.match(md, /## 已关闭/u);
+  assert.match(md, /exit=3/u);
+  assert.match(md, /已处理/u);
+});
+
+test("renderMarkdown：空台账给出明确提示而不是空文件", () => {
+  assert.match(renderMarkdown({ instance: "main", items: [], live: { jobs: [] } }), /没有记录/u);
+});
+
+test("renderNotes：没有文件/空文件 → 不注入任何东西", () => {
+  process.env.DSH_WORK_NOTES = "/tmp/does-not-exist-notes.md";
+  assert.equal(renderNotes(), "");
+  writeFileSync("/tmp/notes-empty.md", "   \n\n");
+  process.env.DSH_WORK_NOTES = "/tmp/notes-empty.md";
+  assert.equal(renderNotes(), "");
+});
+
+test("renderNotes：正常读出；超长时截断并指向原文件", () => {
+  writeFileSync("/tmp/notes-ok.md", "实验必须记 seed\n别用 sudo");
+  process.env.DSH_WORK_NOTES = "/tmp/notes-ok.md";
+  assert.match(renderNotes(), /必须记 seed/u);
+
+  writeFileSync("/tmp/notes-long.md", "x".repeat(50));
+  process.env.DSH_WORK_NOTES = "/tmp/notes-long.md";
+  const out = renderNotes(20);
+  assert.ok(out.length < 60, "要截断");
+  assert.match(out, /已截断/u);
+  assert.match(out, /notes-long\.md/u);
 });

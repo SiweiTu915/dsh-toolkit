@@ -13,6 +13,48 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
+/**
+ * 台账记录格式版本。
+ *
+ * 为什么要有它：这份台账已经演进过三次（加 `instance` / `progress` / `exit`），
+ * 全靠"缺省当老数据"兼容 —— 再加字段就会变成静默混读。所以照 DSH 官方会话格式
+ * 的做法：**记录带版本、读时只做相邻升级、遇到比自己新的版本明确拒绝**，
+ * 而不是猜着读。
+ */
+export const LEDGER_VERSION = 1;
+
+/**
+ * 相邻升级表：vN → vN+1。
+ * 现在只有 v1，占位是为了让"下一次改结构"只加一个函数，而不是改读逻辑。
+ */
+const UPGRADES = {
+  // 1: (record) => ({ ...record, v: 2, /* 新字段 */ }),
+};
+
+/** 本进程读到的"拒绝记录"计数（版本比本构建新）。 */
+let refusedCount = 0;
+
+/** 取上次 fold 的拒绝计数（0 = 全部可读）。 */
+export function refusedRecords() {
+  return refusedCount;
+}
+
+/**
+ * 把一条记录升级到当前版本。
+ * @returns 升级后的记录；版本比本构建新时返回 null（拒绝，不猜）。
+ */
+export function upgradeRecord(record) {
+  let current = { ...record };
+  current.v ??= 1; // 老数据没有 v，按 v1 处理
+  if (current.v > LEDGER_VERSION) return null;
+  while (current.v < LEDGER_VERSION) {
+    const step = UPGRADES[current.v];
+    if (!step) return null; // 缺一跳就不猜
+    current = step(current);
+  }
+  return current;
+}
+
 /** 台账文件位置（可用 DSH_WORK_LEDGER 覆盖，便于测试）。 */
 export function ledgerPath() {
   const home = process.env.DSH_HOME ?? join(homedir(), ".dsh");
@@ -59,7 +101,7 @@ export function visibleTo(item, instance = instanceName()) {
 export function append(event) {
   const file = ledgerPath();
   mkdirSync(dirname(file), { recursive: true });
-  const line = JSON.stringify({ t: new Date().toISOString(), ...event });
+  const line = JSON.stringify({ t: new Date().toISOString(), v: LEDGER_VERSION, ...event });
   const prev = existsSync(file) ? readFileSync(file, "utf8") : "";
   writeFileSync(file, `${prev}${prev && !prev.endsWith("\n") ? "\n" : ""}${line}\n`, "utf8");
   return event.id;
@@ -71,6 +113,7 @@ export function append(event) {
  * @returns 工作项数组（保持首次出现的顺序）。
  */
 export function fold(text) {
+  refusedCount = 0;
   const items = new Map();
   for (const line of String(text ?? "").split("\n")) {
     if (!line.trim()) continue;
@@ -80,6 +123,12 @@ export function fold(text) {
     } catch {
       continue; // 坏行跳过，不让台账陪葬
     }
+    const upgraded = upgradeRecord(event);
+    if (upgraded === null) {
+      refusedCount += 1; // 比本构建新:跳过而不是猜着读
+      continue;
+    }
+    event = upgraded;
     if (event.op === "add") {
       items.set(event.id, { ...event, closed: false });
     } else if (event.op === "close" && items.has(event.id)) {
@@ -335,4 +384,152 @@ export function progressBar(progress, width = 12) {
   if (!progress) return "";
   const filled = Math.max(0, Math.min(width, Math.round((progress.pct / 100) * width)));
   return `${"█".repeat(filled)}${"░".repeat(width - filled)} ${progress.done}/${progress.total} (${progress.pct}%)`;
+}
+
+/* ------------------------------- 提醒节流 ------------------------------- */
+
+/**
+ * 已提醒过的记录（item id → 首次提醒时间）。
+ *
+ * 为什么需要：`context()` 每轮装配都会跑，以前每轮都把**同一条**工作项整段
+ * 重新注入 —— 一条挂了三天的事会喊你三天，把提示词预算和注意力都吃掉。
+ * 现在：**新条目完整提醒一次**，之后降级成一句"另有 N 条之前提醒过"。
+ */
+export function announcedPath() {
+  const home = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+  return process.env.DSH_WORK_ANNOUNCED ?? join(home, ".state", "work-announced.json");
+}
+
+export function loadAnnounced() {
+  const file = announcedPath();
+  if (!existsSync(file)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveAnnounced(map) {
+  const file = announcedPath();
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(map, null, 2), "utf8");
+  renameSync(tmp, file);
+}
+
+/**
+ * 渲染"等你处理"的注入文本，并告诉调用方**这次该把哪些标成已提醒**。
+ *
+ * @param items - 待处理工作项。
+ * @param announced - 已有的已提醒记录。
+ * @param limit - 一次最多完整提醒几条。
+ * @param now - 时间戳（测试可注入）。
+ * @returns {{ text: string, mark: string[] }}
+ */
+export function renderPending(items, announced = {}, limit = 5, now = Date.now()) {
+  if (items.length === 0) return { text: "", mark: [] };
+  const fresh = items.filter((item) => !announced[item.id]);
+  const seen = items.length - fresh.length;
+  const show = fresh.slice(0, limit);
+  const rest = fresh.length - show.length;
+
+  const lines = show.map((item) => `- ${item.state} · ${item.summary}`);
+  if (rest > 0) lines.push(`（另有 ${rest} 条新事项，用 work 工具 action="list" 看）`);
+  if (seen > 0) lines.push(`（另有 ${seen} 条之前提醒过，已省略；需要时 work list）`);
+
+  return {
+    text: lines.join("\n"),
+    mark: show.map((item) => item.id),
+  };
+}
+
+/* --------------------------------- 导出 --------------------------------- */
+
+/**
+ * 把台账渲染成 Markdown（论文附录/周报用）。
+ *
+ * 为什么值得有：台账现在只能 `list`，进不了文档；而"这周跑了什么、失败了什么、
+ * 为什么失败"恰恰是写论文/汇报时要复述的东西。
+ *
+ * @param params.items - 工作项（含已关闭的，由调用方决定范围）。
+ * @param params.live - 在跑快照。
+ * @param params.instance - 归属（写进标题，避免把别人的也导出去）。
+ * @param params.generatedAt - 生成时间字符串。
+ * @returns Markdown 文本。
+ */
+export function renderMarkdown({ items = [], live = { jobs: [] }, instance = "global", generatedAt = new Date().toISOString() } = {}) {
+  const open = items.filter((item) => !item.closed);
+  const closed = items.filter((item) => item.closed);
+  const out = [
+    `# 工作项台账 · ${instance}`,
+    "",
+    `> 生成于 ${generatedAt} · 共 ${items.length} 条（在跑 ${live.jobs.length} · 待处理 ${open.length} · 已关闭 ${closed.length}）`,
+    "",
+  ];
+
+  if (live.jobs.length > 0) {
+    out.push("## 在跑", "", "| 作业 | 已跑 | 日志 | 进度 | 状态 |", "|---|---|---|---|---|");
+    for (const job of live.jobs) {
+      const size = job.bytes < 1024 ? `${job.bytes}B` : `${(job.bytes / 1024).toFixed(1)}KB`;
+      const prog = job.progress ? `${job.progress.done}/${job.progress.total} (${job.progress.pct}%)` : "—";
+      const state = job.stalled ? `⚠ ${humanMs(job.quietMs)} 无输出` : `${humanMs(job.quietMs)} 前有输出`;
+      out.push(`| ${job.id} | ${humanMs(job.elapsedMs)} | ${size} | ${prog} | ${state} |`);
+    }
+    out.push("");
+  }
+
+  const section = (title, rows) => {
+    if (rows.length === 0) return;
+    out.push(`## ${title}`, "");
+    for (const item of rows) {
+      out.push(`### ${item.id} · ${item.state ?? "?"}`, "");
+      if (item.summary) out.push(`- **摘要**：${item.summary}`);
+      if (item.advice) out.push("- **建议**：", ...String(item.advice).split("\n").map((line) => `  - ${line}`));
+      if (item.judgment) out.push("- **判断**：", ...String(item.judgment).split("\n").map((line) => `  - ${line}`));
+      if (item.note) out.push(`- **备注**：${item.note}`);
+      const ev = item.evidence ?? {};
+      const bits = ["job", "exit", "started", "finished"].filter((k) => ev[k] !== undefined && ev[k] !== "-");
+      if (bits.length) out.push(`- **证据**：${bits.map((k) => `${k}=${ev[k]}`).join(" · ")}`);
+      out.push("");
+    }
+  };
+
+  section("待处理", open);
+  section("已关闭", closed);
+  if (open.length === 0 && closed.length === 0 && live.jobs.length === 0) out.push("_没有记录。_", "");
+  return out.join("\n");
+}
+
+/* ------------------------------ 常驻约束文件 ------------------------------ */
+
+/** 常驻约束文件位置（用户自己写，插件只读）。 */
+export function notesPath() {
+  const home = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+  return process.env.DSH_WORK_NOTES ?? join(home, "agent-notes.md");
+}
+
+/**
+ * 读取常驻约束文本。
+ *
+ * 为什么值得有：有些要求你每次都要重复说一遍（"实验必须记 seed"、"别用 sudo"、
+ * "结论要带区间"）。写进这个文件，插件每轮注入 —— **改文案不用改代码、不用重启**。
+ * 注意：这是**提示词**，不是权限控制；真正的护栏仍要靠工具/沙箱。
+ *
+ * @param maxChars - 截断上限（防止把整个文件塞进提示词）。
+ * @returns 文本；文件不存在或为空时返回空串。
+ */
+export function renderNotes(maxChars = 1200) {
+  const file = notesPath();
+  if (!existsSync(file)) return "";
+  let text = "";
+  try {
+    text = readFileSync(file, "utf8").trim();
+  } catch {
+    return "";
+  }
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n…（已截断，完整内容见 ${file}）`;
 }

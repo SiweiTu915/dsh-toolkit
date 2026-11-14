@@ -22,9 +22,13 @@ import {
   formatItem,
   instanceName,
   loadItems,
+  loadAnnounced,
   loadLive,
   pendingItems,
+  renderNotes,
+  renderPending,
   renderRunning,
+  saveAnnounced,
 } from "./ledger.mjs";
 
 export const name = "dsh-work";
@@ -213,13 +217,35 @@ export function apply(ctx) {
           if (running) sections.push(`正在跑的作业（实时快照，由 launchd 每 60s 刷新）：\n${running}`);
           const items = pendingItems({ instance: me });
           if (items.length > 0) {
-            const lines = items.slice(0, 5).map((item) => `- ${item.state} · ${item.summary}`);
-            const more = items.length > 5 ? `\n（另有 ${items.length - 5} 条，用 work 工具 action="list" 看）` : "";
-            sections.push(`待你处理的工作项 ${items.length} 条（用 work 工具处理）：\n${lines.join("\n")}${more}`);
+            const announced = loadAnnounced();
+            const { text, mark } = renderPending(items, announced);
+            if (text) sections.push(`待你处理的工作项 ${items.length} 条（用 work 工具处理）：\n${text}`);
+            // 只在**真的注入了**之后才标记已提醒；写失败不影响本轮
+            if (mark.length > 0) {
+              try {
+                const next = { ...announced };
+                for (const id of mark) next[id] = new Date().toISOString();
+                saveAnnounced(next);
+              } catch { /* 节流状态写不进去也不能拖垮会话 */ }
+            }
           }
           return sections.join("\n\n");
         } catch {
           return ""; // 台账坏了不能拖垮会话
+        }
+      },
+    });
+    // 常驻约束:用户写在 $DSH_HOME/agent-notes.md,每轮注入。改文案不用改代码。
+    ctx.systemPrompt.context({
+      name: "work:notes",
+      order: 155,
+      interpolate: false,
+      text: () => {
+        try {
+          const notes = renderNotes();
+          return notes ? `常驻约束（来自 agent-notes.md，用户手写；与工具权限无关）：\n${notes}` : "";
+        } catch {
+          return "";
         }
       },
     });
