@@ -373,7 +373,8 @@ async function startDirect(s) {
     fd = openSync(bootLogPath(s.name), "a");
     stdio = ["ignore", fd, fd];
   } catch { /* 打不开日志就退回 ignore */ }
-  const child = spawn(process.execPath, [bin, "web", "--port", String(s.dshPort)], {
+  // --no-open:面板托管实例不该弹浏览器窗口(每次重启都弹很烦)
+  const child = spawn(process.execPath, [bin, "web", "--port", String(s.dshPort), "--no-open"], {
     stdio,
     detached: true,
     env: { ...process.env, DSH_HOME: dshHome },
