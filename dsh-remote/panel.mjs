@@ -364,6 +364,22 @@ async function startDirect(s) {
     delete pids[s.name];
     savePids(pids);
   }
+  // 端口可能被**上一个还没退干净的进程**占着(典型:刚 disconnect 就 connect)。
+  // 不确认端口真空就 spawn,新进程会 EADDRINUSE 立刻退出 —— 表面"连不上",
+  // 实际是"起了又死",而且面板会把状态记成 offline。
+  for (let i = 0; i < 20 && (await isPortOpen(s.dshPort)); i += 1) {
+    if (i === 10) {
+      const stale = loadPids()[s.name];
+      if (stale && isPidAlive(stale)) {
+        console.log(`○ ${s.name} 端口仍被 pid ${stale} 占着,发 KILL`);
+        try { process.kill(stale, "SIGKILL"); } catch { /* 已死 */ }
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (await isPortOpen(s.dshPort)) {
+    return { ok: false, msg: `端口 ${s.dshPort} 仍被占用(旧实例没退干净),已放弃启动` };
+  }
   const bin = findDshBin();
   const dshHome = s.home || join(homedir(), ".dsh");
   mkdirSync(STATE_DIR, { recursive: true });
@@ -391,10 +407,35 @@ async function stopTunnel(name) {
   const server = loadServers().find((s) => s.name === name);
   const port = server ? (server.localPort ?? server.dshPort) : null;
   const serving = pid && isPidAlive(pid) && port && (await isPortOpen(port));
-  if (serving) { try { process.kill(pid, "SIGTERM"); } catch {} }
+  // 关键:spawn 时用了 detached → 子进程是**进程组组长**。只 kill 那个 pid 会留下
+  // 它再拉起的子进程(真正占端口的常常是子进程),于是 disconnect 看着"停了",端口还在。
+  // 先按组杀(-pid),失败再退化为单 pid。
+  const killGroup = (target) => {
+    try { process.kill(-target, "SIGTERM"); return true } catch { /* 不是组长 */ }
+    try { process.kill(target, "SIGTERM"); return true } catch { return false }
+  };
+  if (serving) killGroup(pid);
   else if (pid && isPidAlive(pid)) { console.log(`○ ${name} 记录过期(pid 已不属于本实例),未执行 kill`); }
   delete pids[name];
   savePids(pids);
+
+  if (!port) return;
+  // 按端口兜底收尸:记录里的 pid 可能不是真正绑端口的那个(dsh 会再拉起子进程)。
+  const listeners = () => {
+    const r = spawnSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+    return (r.stdout ?? "").split("\n").map((line) => line.trim()).filter(Boolean).map(Number).filter((n) => Number.isFinite(n));
+  };
+  for (let i = 0; i < 10 && (await isPortOpen(port)); i += 1) await new Promise((r) => setTimeout(r, 500));
+  if (!(await isPortOpen(port))) return;
+  const strays = listeners().filter((stray) => stray !== process.pid);
+  if (strays.length === 0) return;
+  console.log(`○ ${name} 端口 ${port} 仍被 ${strays.join(",")} 占着,继续收尸`);
+  for (const stray of strays) { try { process.kill(-stray, "SIGTERM") } catch { try { process.kill(stray, "SIGTERM") } catch { /* 已死 */ } } }
+  for (let i = 0; i < 6 && (await isPortOpen(port)); i += 1) await new Promise((r) => setTimeout(r, 500));
+  if (await isPortOpen(port)) {
+    console.log(`○ ${name} 端口 ${port} 还在,发 KILL`);
+    for (const stray of listeners()) { try { process.kill(stray, "SIGKILL") } catch { /* 已死 */ } }
+  }
 }
 async function serverStatus(s) {
   const pids = loadPids();
