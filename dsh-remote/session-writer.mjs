@@ -122,14 +122,20 @@ function textBlocks(text) {
 /**
  * 把一条外部对话转成 DSH 事件序列。
  *
- * 序列（与真实会话一致，不多造）：
- *   permission/preset → sandbox/mode → approval/policy → session/end-seed
- *   每轮: turn/start → user/message → assistant/message → turn/end
- *   最后: session/title（指向第一条用户消息的 seq）
+ * 序列必须和真实会话**同构**，否则读的时候会被 SessionFormatError 拒掉
+ * （实测：`turn/start does not open the expected turn`）。DSH 的状态机是：
+ *   · `nextTurn` 从 **1** 开始、`nextStep` 从 **1** 开始
+ *   · `turn/start {turn:N}` 之后才能 `step/start {turn:N, step:M}`
+ *   · step 内的消息（`assistant/message`）必须带 `turn/step` 且等于当前值
+ *   · `user/message` **不带** turn/step（它不是 step 事件），且要 `surfaceOp: "append"`
+ *   · 收尾必须 `step/end {turn,step}` → `turn/end {turn,reason}`
  *
- * @returns {{events:object[], thinking:object[], skipped:number}}
+ * 所以每轮固定为：
+ *   turn/start → step/start → user/message → assistant/message → step/end → turn/end
+ *
+ * @returns {{events:object[], thinking:object[], skipped:number, sessionId:string}}
  */
-export function buildEvents(conversation, { sessionId = randomUUID(), sidecarNote = "" } = {}) {
+export function buildEvents(conversation, { sessionId = randomUUID() } = {}) {
   const events = [];
   let seq = 0;
   let clock = Date.now();
@@ -145,48 +151,35 @@ export function buildEvents(conversation, { sessionId = randomUUID(), sidecarNot
   push("session/end-seed", {});
 
   const thinking = [];
-  let turn = 0;
-  let step = 0;
-  let firstUserSeq;
   let skipped = 0;
-  let pending = null; // 等配对的用户消息
+  let firstUserSeq;
+  let turn = 1;          // 1-based
+  let openTurn = false;  // 已 turn/start，等 step/end+turn/end
 
-  const flushAssistant = (text) => {
-    if (text === undefined) return;
-    push("step/start", { turn, step });
-    push("assistant/message", {
-      turn,
-      step,
-      message: {
-        role: "assistant",
-        content: textBlocks(text),
-        source: { kind: "model", provider: "imported", model: "imported" },
-        id: randomUUID(),
-      },
-      stream: [],
-    }, { surfaceOp: "append" });
-    push("step/end", { turn, step });
-    step += 1;
+  const openTurnAt = () => {
+    if (openTurn) return;
+    push("turn/start", { turn });
+    push("step/start", { turn, step: 1 });
+    openTurn = true;
+  };
+  const closeTurn = () => {
+    if (!openTurn) return;
+    push("step/end", { turn, step: 1 });
     push("turn/end", { turn, reason: { kind: "completed" } });
+    openTurn = false;
     turn += 1;
   };
 
   for (const message of conversation.messages ?? []) {
     const role = message.role === "assistant" ? "assistant" : "user";
     const text = typeof message.content === "string" ? message.content.trim() : "";
-    if (!text) {
-      skipped += 1;
-      continue;
-    }
+    if (!text) { skipped += 1; continue; }
     if (message.thinking && String(message.thinking).trim()) {
       thinking.push({ index: thinking.length + 1, role, text: String(message.thinking).trim() });
     }
 
+    openTurnAt();
     if (role === "user") {
-      // 上一条用户消息没有回答：给它一个空的 assistant 占位，保证 turn 成对
-      if (pending !== null) flushAssistant(pending);
-      pending = "";
-      push("turn/start", { turn });
       const event = push("user/message", {
         content: textBlocks(text),
         source: { kind: "user", rpcId: randomUUID() },
@@ -194,15 +187,23 @@ export function buildEvents(conversation, { sessionId = randomUUID(), sidecarNot
         id: randomUUID(),
       }, { surfaceOp: "append" });
       if (firstUserSeq === undefined) firstUserSeq = event.seq;
-    } else if (pending !== null) {
-      pending = text;
     } else {
-      // 没有前置用户消息的助手回复：补一个空的 turn/start，避免事件错位
-      push("turn/start", { turn });
-      flushAssistant(text);
+      push("assistant/message", {
+        turn,
+        step: 1,
+        message: {
+          role: "assistant",
+          content: textBlocks(text),
+          // 用真实会话里的 provider/model 形状；编造的名字可能过不了来源校验
+          source: { kind: "model", provider: "deepseek-account", model: "deepseek-flash" },
+          id: randomUUID(),
+        },
+        stream: [],
+      }, { surfaceOp: "append" });
+      closeTurn();
     }
   }
-  if (pending !== null) flushAssistant(pending);
+  closeTurn();
 
   if (firstUserSeq !== undefined) {
     push("session/title", {
@@ -244,6 +245,34 @@ export function decodeSession(buf) {
   const [header, ...events] = rows;
   const dense = events.every((event, index) => event.seq === index);
   return { header, events, dense };
+}
+
+/* -------------------------------- 官方校验 -------------------------------- */
+
+/**
+ * 用 **DSH 自己的** v4 关系校验器验证事件序列。
+ *
+ * 为什么必须做：写进 `sessions/` 的坏会话会让**整个会话列表**都不显示
+ * （实测：一条 `turn/start does not open the expected turn` 就把侧栏清空）。
+ * 所以写入前先跑一遍 DSH 的校验器，不通过就一个字都不写。
+ *
+ * 注意：这个校验器（迁移路径用的）不接受 header 上的 `type` 字段，
+ * 而磁盘上的真文件是带 `type` 的 —— 所以验证时把它去掉。
+ *
+ * @returns {{ok:boolean, error?:string, skipped?:boolean}}
+ */
+export async function assertWithDshValidator(events, header, home = dshHome()) {
+  const file = join(home, "harness", "current", "node_modules", "@deepseek-ai",
+    "dsh-session-format-v3-to-v4", "lib", "index.js");
+  if (!existsSync(file)) return { ok: true, skipped: true }; // 拿不到校验器就不假装验过
+  const { restoreReleasedV4Artifact, RELEASED_V3_EVENT_TYPES } = await import(file);
+  const { type: _ignored, ...bare } = header;
+  try {
+    restoreReleasedV4Artifact({ header: bare, events, inheritedEventCount: 0 }, RELEASED_V3_EVENT_TYPES);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message ?? String(error) };
+  }
 }
 
 /* --------------------------------- 预览 --------------------------------- */
@@ -366,12 +395,17 @@ export function findWorkspace(store, workspacePath) {
   return null;
 }
 
-/** 校验每个工作区字段齐全（缺一个 DSH 会整文件校验失败）。 */
+/** 日期字段必须是 ISO 字符串：DSH 的 zod schema 只接受 string，写数字会让整份 workspace.json 打不开。 */
+const WORKSPACE_DATE_FIELDS = ["createdAt", "updatedAt"];
+
+/** 校验每个工作区字段齐全、日期字段是字符串（缺字段或类型错，DSH 会整份校验失败）。 */
 export function validateWorkspaces(store) {
   const table = store?.tables?.workspaces ?? {};
   for (const [id, ws] of Object.entries(table)) {
     const missing = WORKSPACE_FIELDS.filter((key) => !(key in ws));
     if (missing.length > 0) return { ok: false, id, missing };
+    const badType = WORKSPACE_DATE_FIELDS.filter((key) => typeof ws[key] !== "string");
+    if (badType.length > 0) return { ok: false, id, badType };
   }
   return { ok: true };
 }
@@ -384,7 +418,7 @@ export function validateWorkspaces(store) {
  *
  * @returns {{ok:boolean, written:object[], skipped:number, error?:string, restored?:boolean}}
  */
-export function applyImport({
+export async function applyImport({
   convs, workspacePath, sourceHash = "", home = dshHome(), register = true, force = false, history = {},
 } = {}) {
   if (isTemplateHome(home)) {
@@ -428,6 +462,10 @@ export function applyImport({
         agentPreset: "standard",
       };
 
+      // 写入前用 DSH 官方校验器验一遍；不通过就整批失败并回滚，绝不落一个坏会话
+      const verdict = await assertWithDshValidator(events, header);
+      if (!verdict.ok) throw new Error(`「${conv.title}」未通过 DSH 校验：${verdict.error}`);
+
       const dir = join(sessionsRoot, sessionId);
       mkdirSync(dir, { recursive: true });
       createdDirs.push(dir);
@@ -449,11 +487,12 @@ export function applyImport({
     if (register && written.length > 0) {
       copyFileSync(storeFile, backupFile);
       found.ws.sessionIds = [...(found.ws.sessionIds ?? []), ...written.map((w) => w.sessionId)];
-      found.ws.updatedAt = Date.now();
+      found.ws.updatedAt = new Date().toISOString();
       const valid = validateWorkspaces(store);
       if (!valid.ok) {
         copyFileSync(backupFile, storeFile);
-        throw new Error(`workspace.json 校验失败（工作区 ${valid.id} 缺 ${valid.missing.join(",")}），已回滚`);
+        const detail = valid.missing ? `缺 ${valid.missing.join(",")}` : `日期字段必须是 ISO 字符串（${valid.badType.join(",")}）`;
+        throw new Error(`workspace.json 校验失败（工作区 ${valid.id} ${detail}），已回滚`);
       }
       writeFileSync(storeFile, `${JSON.stringify(store, null, 2)}\n`);
     }
@@ -539,7 +578,7 @@ async function main(argv) {
     return 0;
   }
 
-  const result = applyImport({
+  const result = await applyImport({
     convs: plan.filter((p) => p.action === "新建").map((p) => p.conv),
     workspacePath: workspace,
     sourceHash,

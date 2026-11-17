@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 const {
   buildEvents, conversationsOf, decodeSession, encodeSession, isRemoteMirror, isTemplateHome,
-  displayWidth, padDisplay, previewTable, projectDirName, validateWorkspaces, applyImport, readExport,
+  assertWithDshValidator, displayWidth, padDisplay, previewTable, projectDirName, validateWorkspaces, applyImport, readExport,
 } = await import("../session-writer.mjs");
 
 test("会话目录名：分隔符换成 -", () => {
@@ -88,24 +88,29 @@ test("previewTable：标记已导入、空对话、并统计将写入数", () =>
   assert.equal(plan.filter((p) => p.action === "新建").length, 1);
 });
 
-test("validateWorkspaces：缺字段要报出来", () => {
-  const ok = validateWorkspaces({ tables: { workspaces: { w: { path: "/a", title: "t", sessionIds: [], createdAt: 1, updatedAt: 1 } } } });
+test("validateWorkspaces：缺字段/日期不是字符串都要报出来", () => {
+  const iso = { createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" };
+  const ok = validateWorkspaces({ tables: { workspaces: { w: { path: "/a", title: "t", sessionIds: [], ...iso } } } });
   assert.equal(ok.ok, true);
-  const bad = validateWorkspaces({ tables: { workspaces: { w: { path: "/a", title: "t" } } } });
-  assert.equal(bad.ok, false);
-  assert.ok(bad.missing.includes("sessionIds"));
+  const missing = validateWorkspaces({ tables: { workspaces: { w: { path: "/a", title: "t" } } } });
+  assert.equal(missing.ok, false);
+  assert.ok(missing.missing.includes("sessionIds"));
+  // 数字时间：DSH 0.2.2 的 zod 只收 string，写数字会让整份 workspace.json 打不开
+  const numeric = validateWorkspaces({ tables: { workspaces: { w: { path: "/a", title: "t", sessionIds: [], createdAt: 1, updatedAt: 1 } } } });
+  assert.equal(numeric.ok, false);
+  assert.deepEqual(numeric.badType, ["createdAt", "updatedAt"]);
 });
 
-test("applyImport：临时 home 端到端（写会话 + 注册 + 可解码）", () => {
+test("applyImport：临时 home 端到端（写会话 + 注册 + 可解码）", async () => {
   const home = mkdtempSync(join(tmpdir(), "sw-home-"));
   const wsPath = join(home, "proj");
   mkdirSync(wsPath, { recursive: true });
   mkdirSync(join(home, "storages"), { recursive: true });
   writeFileSync(join(home, "storages", "workspace.json"), JSON.stringify({
-    unit: "x", global: {}, tables: { workspaces: { w1: { path: wsPath, title: "t", sessionIds: [], createdAt: 1, updatedAt: 1 } } },
+    unit: "x", global: {}, tables: { workspaces: { w1: { path: wsPath, title: "t", sessionIds: [], createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" } } },
   }, null, 2));
 
-  const r = applyImport({ convs: [{ id: "c1", title: "导入的", messages: [{ role: "user", content: "问" }, { role: "assistant", content: "答" }] }], workspacePath: wsPath, home });
+  const r = await applyImport({ convs: [{ id: "c1", title: "导入的", messages: [{ role: "user", content: "问" }, { role: "assistant", content: "答" }] }], workspacePath: wsPath, home });
   assert.equal(r.ok, true, r.error);
   assert.equal(r.written.length, 1);
 
@@ -119,19 +124,20 @@ test("applyImport：临时 home 端到端（写会话 + 注册 + 可解码）", 
 
   const store = JSON.parse(readFileSync(join(home, "storages", "workspace.json"), "utf8"));
   assert.equal(store.tables.workspaces.w1.sessionIds.length, 1, "应注册进 workspace.json");
+  assert.equal(typeof store.tables.workspaces.w1.updatedAt, "string", "updatedAt 必须是 ISO 字符串（数字会让 DSH 打不开工作区）");
 });
 
-test("applyImport：模板实例直接拒绝", () => {
-  const r = applyImport({ convs: [], workspacePath: "/w", home: "/Users/x/.dsh/dsh-remote/sim-homes/box" });
+test("applyImport：模板实例直接拒绝", async () => {
+  const r = await applyImport({ convs: [], workspacePath: "/w", home: "/Users/x/.dsh/dsh-remote/sim-homes/box" });
   assert.equal(r.ok, false);
   assert.match(r.error, /模板实例/u);
 });
 
-test("applyImport：目标工作区不在 workspace.json 时拒绝而不是瞎建", () => {
+test("applyImport：目标工作区不在 workspace.json 时拒绝而不是瞎建", async () => {
   const home = mkdtempSync(join(tmpdir(), "sw-home2-"));
   mkdirSync(join(home, "storages"), { recursive: true });
   writeFileSync(join(home, "storages", "workspace.json"), JSON.stringify({ tables: { workspaces: {} } }));
-  const r = applyImport({ convs: [{ id: "x", title: "t", messages: [{ role: "user", content: "a" }] }], workspacePath: "/nope", home });
+  const r = await applyImport({ convs: [{ id: "x", title: "t", messages: [{ role: "user", content: "a" }] }], workspacePath: "/nope", home });
   assert.equal(r.ok, false);
   assert.match(r.error, /没有路径为/u);
 });
@@ -149,4 +155,22 @@ test("displayWidth/padDisplay：中文算两格", () => {
   assert.equal(displayWidth("中文"), 4);
   assert.equal(displayWidth("ab"), 2);
   assert.equal(padDisplay("中文", 6), "中文  ");
+});
+
+test("assertWithDshValidator：DSH 自己的校验器能挡住坏事件、放行好事件", async () => {
+  const home = process.env.HOME ?? "/tmp";
+  const header = { type: "session", version: 4, id: "session-t", createdAt: Date.now(), cwd: "/tmp", isSeeded: false, delegationDepth: 0, agentPreset: "standard" };
+  // 坏：turn 从 0 开始（这正是真实事故里的错）
+  const bad = [{ type: "permission/preset", seq: 0, time: 1, data: { preset: "workspace-write" } },
+               { type: "turn/start", seq: 1, time: 2, data: { turn: 0 } }];
+  const badResult = await assertWithDshValidator(bad, header, home);
+  if (badResult.skipped) return; // 该机器没有 harness 就跳过（不算失败）
+  assert.equal(badResult.ok, false);
+  assert.match(badResult.error, /turn\/start|does not open/u);
+
+  // 好：用 buildEvents 生成的真实序列
+  const { events } = buildEvents({ title: "t", messages: [
+    { role: "user", content: "a" }, { role: "assistant", content: "b" }] });
+  const good = await assertWithDshValidator(events, header, home);
+  assert.equal(good.ok, true, good.error);
 });
