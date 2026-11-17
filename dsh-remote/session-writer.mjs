@@ -156,10 +156,28 @@ export function buildEvents(conversation, { sessionId = randomUUID() } = {}) {
   let turn = 1;          // 1-based
   let openTurn = false;  // 已 turn/start，等 step/end+turn/end
 
+  let systemEmitted = false;
   const openTurnAt = () => {
     if (openTurn) return;
     push("turn/start", { turn });
     push("step/start", { turn, step: 1 });
+    // `system/message` 必须是**第一条 surface 事件**（它占"受保护的头"）。
+    // 少了它，DSH 之后自己追加 system/message 时会抛
+    // 「system/message requires a protected first surface head」，
+    // 表现就是"历史加载失败"。所以导入时先放一条空的系统消息占位。
+    if (!systemEmitted) {
+      push("system/message", {
+        turn,
+        step: 1,
+        message: {
+          id: randomUUID(),
+          role: "system",
+          source: { kind: "system-prompt" },
+          content: [],
+        },
+      }, { surfaceOp: "append" });
+      systemEmitted = true;
+    }
     openTurn = true;
   };
   const closeTurn = () => {
@@ -265,23 +283,31 @@ export async function assertWithDshValidator(events, header, home = dshHome()) {
   const file = join(home, "harness", "current", "node_modules", "@deepseek-ai",
     "dsh-session-format-v3-to-v4", "lib", "index.js");
   if (!existsSync(file)) return { ok: true, skipped: true }; // 拿不到校验器就不假装验过
+  // 我们自己的不变量：**导入会话的第一条 surface 事件必须是 system/message**。
+  // 缺口是 DSH 自己的校验器抓不到的 —— 因为"没有 system/message"本身合法，
+  // 直到 DSH 下一轮想追加自己的 system/message 时才炸（表现：历史加载失败）。
+  const SURFACE_TYPES = new Set(["system/message", "user/message", "assistant/message"]);
+  const firstSurface = events.find((event) => SURFACE_TYPES.has(event.type));
+  if (firstSurface !== undefined && firstSurface.type !== "system/message") {
+    return {
+      ok: false,
+      error: `第一条 surface 事件是 ${firstSurface.type}，必须是 system/message（否则 DSH 追加系统提示时会拒绝加载）`,
+    };
+  }
+
   const { restoreReleasedV4Artifact, RELEASED_V3_EVENT_TYPES } = await import(file);
   const { type: _ignored, ...bare } = header;
-  // 校验器自带的词汇表是 v3 时代的；v4 会合法地出现新类型（如 job/registered、
-  // agent/inbox/spliced）。把事件里实际出现的类型也并进去，否则**正常会话会被误判
-  // 成 corrupt**（关系校验只对我们认识的类型生效，其余跳过）。
+  // 校验器自带词汇表是 v3 时代的；v4 会合法出现新类型（job/registered 等），
+  // 并进事件里实际出现的类型，否则正常会话会被判 unknown type。
   const known = new Set([...RELEASED_V3_EVENT_TYPES, ...events.map((event) => event.type)]);
   try {
     restoreReleasedV4Artifact({ header: bare, events, inheritedEventCount: 0 }, known);
     return { ok: true };
   } catch (error) {
-    const message = error?.message ?? String(error);
-    // 这个校验器来自**迁移路径**，规则比运行时更严（例如要求 system/message 占据
-    // 受保护的第一个 surface head）。用它当硬门禁会误伤**已经能正常打开的会话**。
-    // 所以只拦我们确认过、且必然致命的那一类：turn/step 生命周期的配对错误。
-    const FATAL = /turn\/start does not open|turn\/end|step\/start|step\/end|requires a step|leaves unresolved tool|is not dense/u;
-    if (FATAL.test(message)) return { ok: false, error: message };
-    return { ok: true, warning: message };
+    // **任何** SessionFormatError 都算致命。曾经把
+    // `system/message requires a protected first surface head` 当"迁移路径过严"
+    // 降级成 warning —— 那正是运行时拒绝加载的原因，结果把坏会话写进了用户目录。
+    return { ok: false, error: error?.message ?? String(error) };
   }
 }
 
@@ -621,11 +647,22 @@ async function main(argv) {
     const { file, store } = readWorkspaceStore(home);
     if (!store) { console.error(`✗ 找不到 ${file}`); return 1; }
     const dryRun = !argv.includes("--yes");
+    // 顺手清掉"指向不存在的会话目录"的 sessionIds：DSH 退出时可能把内存里的旧列表
+    // 写回磁盘，把已删除的会话 id 又带回来 —— 这类孤儿 id 会让列表报错。
+    let dropped = 0;
+    const sessionsRoot = join(home, "sessions");
+    for (const ws of Object.values(store.tables?.workspaces ?? {})) {
+      const ids = (ws.sessionIds ?? []);
+      const keep = ids.filter((id) => existsSync(join(sessionsRoot, projectDirName(ws.path), id)));
+      if (keep.length !== ids.length) { dropped += ids.length - keep.length; ws.sessionIds = keep; }
+    }
+
     const before = validateWorkspaces(store);
     const fixed = syncWorkspaceOrder(store);
     const after = validateWorkspaces(store);
     console.log(`  修复前: ${before.ok ? "一致" : before.error ?? JSON.stringify(before)}`);
     console.log(`  顺序同步: 补 ${fixed.added.length} 个 · 去 ${fixed.removed.length} 个${fixed.changed ? "" : "（无需改动）"}`);
+    if (dropped > 0) console.log(`  孤儿 sessionIds: 清掉 ${dropped} 个（磁盘上已无对应目录）`);
     console.log(`  修复后: ${after.ok ? "✅ 一致" : "✗ " + (after.error ?? JSON.stringify(after))}`);
     if (dryRun) { console.log("  （预览模式，未写盘；加 --yes 才写）"); return after.ok ? 0 : 1; }
     if (!after.ok) { console.error("  仍有问题，未写盘（先人工看一下）"); return 1; }

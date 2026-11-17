@@ -194,3 +194,21 @@ test("validateWorkspaces：注册表 order 漏登 / 重复 / 引用不存在，�
   assert.equal(changed.added.length, 1);
   assert.equal(validateWorkspaces(store).ok, true);
 });
+
+test("safety：首条 surface 不是 system/message 时必须拒绝（DSH 校验器抓不到这条）", async () => {
+  const h = { type: "session", version: 4, id: "s", createdAt: Date.now(), cwd: "/tmp", isSeeded: false, delegationDepth: 0, agentPreset: "standard" };
+  const noHead = [
+    { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+    { type: "step/start", seq: 1, time: 2, data: { turn: 1, step: 1 } },
+    { type: "user/message", seq: 2, time: 3, data: { content: [{ type: "text", text: "x" }], role: "user", id: "i", source: { kind: "user", rpcId: "r" } }, surfaceOp: "append" },
+    { type: "step/end", seq: 3, time: 4, data: { turn: 1, step: 1 } },
+    { type: "turn/end", seq: 4, time: 5, data: { turn: 1, reason: { kind: "completed" } } },
+  ];
+  const r = await assertWithDshValidator(noHead, h);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /system\/message/u);
+
+  // 正常产物必须通过
+  const ok = await assertWithDshValidator(buildEvents({ title: "t", messages: [{ role: "user", content: "a" }, { role: "assistant", content: "b" }] }).events, h);
+  assert.equal(ok.ok, true, ok.error);
+});
