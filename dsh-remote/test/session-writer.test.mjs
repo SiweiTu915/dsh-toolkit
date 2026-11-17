@@ -174,3 +174,23 @@ test("assertWithDshValidator：DSH 自己的校验器能挡住坏事件、放行
   const good = await assertWithDshValidator(events, header, home);
   assert.equal(good.ok, true, good.error);
 });
+
+test("validateWorkspaces：注册表 order 漏登 / 重复 / 引用不存在，都要报出来", async () => {
+  const { validateWorkspaces, syncWorkspaceOrder } = await import("../session-writer.mjs");
+  const mk = (ids) => ({ global: { initialized: true, workspaceIds: ids }, tables: { workspaces: {
+    a: { path: "/a", title: "a", sessionIds: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+    b: { path: "/b", title: "b", sessionIds: [], createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z" } } } });
+
+  assert.equal(validateWorkspaces(mk(["a", "b"])).ok, true);
+  const orphan = validateWorkspaces(mk(["a"]));
+  assert.equal(orphan.ok, false);
+  assert.match(orphan.error, /absent from registry order/u);
+  assert.equal(validateWorkspaces(mk(["a", "a", "b"])).ok, false);
+  assert.equal(validateWorkspaces(mk(["a", "b", "zzz"])).ok, false);
+
+  // syncWorkspaceOrder 应该把漏登的补上
+  const store = mk(["a"]);
+  const changed = syncWorkspaceOrder(store);
+  assert.equal(changed.added.length, 1);
+  assert.equal(validateWorkspaces(store).ok, true);
+});
