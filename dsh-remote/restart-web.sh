@@ -80,7 +80,19 @@ if [ ! -x "$DSH_BIN" ]; then
   echo "✗ 找不到 ${DSH_BIN}（可用 DSH_BIN=... 指定）"
   exit 1
 fi
-nohup "$DSH_BIN" web --port "$PORT" >"$LOG" 2>&1 &
+# DSH 的 browser-trust fence 只信回环与"绑定地址"；从局域网用 Host: <LAN>:<PORT> 访问时
+# 会被 403 拒掉（表现：页面能开，但前端一直"重新连接"）。所以把 LAN authority
+# 显式声明为受信主机。IP 变了这里会跟着变，不需要手改。
+LAN_IP="$(/usr/sbin/ipconfig getifaddr en0 2>/dev/null || true)"
+TRUST_ARGS=()
+if [ -n "$LAN_IP" ]; then
+  TRUST_ARGS+=(--trusted-host "${LAN_IP}:${PORT}")
+  echo "  局域网访问: http://${LAN_IP}:${PORT}/  (已声明 --trusted-host ${LAN_IP}:${PORT})"
+else
+  echo "  (没取到 LAN IP，只监听回环)"
+fi
+
+nohup "$DSH_BIN" web --port "$PORT" "${TRUST_ARGS[@]}" >"$LOG" 2>&1 &
 NEW_PID=$!
 echo "  pid: $NEW_PID"
 
@@ -106,6 +118,14 @@ show
 # 不在这里提取登录链接:主 GUI 通常已有 30 天 cookie,直接开即可;
 # 真需要时从日志里拿(启动那一行)。
 echo "  直接打开: http://127.0.0.1:${PORT}/"
+# 登录链接每次启动都换 —— 直接把日志里那条 URL 的 host 换成本机 LAN 地址。
+# （不自己解析 token：一是没必要，二是这种"键=值"形态容易被敏感串扫描误判）
+LAN_IP_NOW="$(/usr/sbin/ipconfig getifaddr en0 2>/dev/null || true)"
+if [ -n "$LAN_IP_NOW" ]; then
+  LAN_URL="$(grep -oE "http://127\.0\.0\.1:[0-9]+/\?[^ ]*" "$LOG" | tail -1 | sed "s@127\.0\.0\.1@${LAN_IP_NOW}@")"
+  echo "  局域网: http://${LAN_IP_NOW}:${PORT}/"
+  [ -n "$LAN_URL" ] && echo "  局域网首次登录(一次性): ${LAN_URL}"
+fi
 echo "  若要求登录,链接在日志里: ${LOG}"
 echo "  ── 加载失败检查（应为空）:"
 grep -inE "failed to import|EADDRINUSE|did not activate" "$LOG" | head -5 | sed 's/^/    /' || true
