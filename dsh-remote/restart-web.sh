@@ -113,6 +113,23 @@ if [ -z "$(holders)" ]; then
   exit 1
 fi
 
+# 5) 确保局域网转发器在跑（独立会话启动，不会被本 shell 的进程组回收）
+if [ -n "${LAN_IP_NOW:-}" ] && command -v node >/dev/null 2>&1; then
+  if ! node "$(dirname "$0")/lan-forward.mjs" --status 2>/dev/null | grep -q "在跑"; then
+    python3 - "$(dirname "$0")/lan-forward.mjs" <<'PYEOF' >/dev/null 2>&1
+import subprocess, sys, os
+log = os.path.expanduser("~/.dsh/logs/lan-forward-3080.log")
+out = open(log, "a", buffering=1)
+subprocess.Popen(["node", sys.argv[1], "--listen-port", "3080", "--target-port", "3080"],
+                 stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+PYEOF
+    sleep 1
+    echo "  已启动局域网转发器: http://${LAN_IP_NOW}:${PORT}/"
+  else
+    echo "  局域网转发器已在运行: http://${LAN_IP_NOW}:${PORT}/"
+  fi
+fi
+
 echo "== 就绪 =="
 show
 # 不在这里提取登录链接:主 GUI 通常已有 30 天 cookie,直接开即可;
