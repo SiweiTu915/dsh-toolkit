@@ -39,10 +39,38 @@ function lanIp() {
 }
 
 const argv = process.argv.slice(2);
+
+/**
+ * `--daemon`：自己 fork 一个**脱离会话**的子进程再退出。
+ *
+ * 为什么需要：从我们的工具调用里直接 `nohup ... &` 起的进程，会随调用结束被
+ * 进程组回收（实测：跑完就没了 → 局域网那边"拒绝连接"）。用 detached + unref
+ * 起的子进程独立存活，之后跟起它的终端无关。
+ */
+if (argv.includes("--daemon")) {
+  const { spawn } = await import("node:child_process");
+  const { openSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const log = join(DSH_HOME, "logs", "lan-forward-3080.log");
+  mkdirSync(join(DSH_HOME, "logs"), { recursive: true });
+  const fd = openSync(log, "a");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...argv.filter((a) => a !== "--daemon")], {
+    detached: true,
+    stdio: ["ignore", fd, fd],
+    cwd: DSH_HOME,
+  });
+  child.unref();
+  console.log(`  已后台启动 lan-forward（pid ${child.pid}）→ 日志 ${log}`);
+  console.log("  查状态: node ~/.dsh/dsh-remote/lan-forward.mjs --status");
+  process.exit(0);
+}
+
 const listenPort = Number(opt(argv, "listen-port", "3080"));
 const targetPort = Number(opt(argv, "target-port", String(listenPort)));
 const targetHost = opt(argv, "target-host", "127.0.0.1");
-const listenHost = opt(argv, "listen-host", null) ?? lanIp();
+// 默认监听**所有网卡**：这台机器同时在多个网段（en0 + VPN/虚拟网卡），
+// 只绑某一个 IP 时，另一台电脑走别的网段就"拒绝连接"（实测踩到）。
+const listenHost = opt(argv, "listen-host", "0.0.0.0");
 
 const pidFile = join(DSH_HOME, ".state", `lan-forward-${listenPort}.pid`);
 const logDir = join(DSH_HOME, "logs");
@@ -107,7 +135,7 @@ server.on("error", (error) => {
 server.listen(listenPort, listenHost, () => {
   writeFileSync(pidFile, `${process.pid}\n`);
   log(`转发已启动：${listenHost}:${listenPort} → ${targetHost}:${targetPort}（pid ${process.pid}）`);
-  log(`从局域网访问：http://${listenHost}:${listenPort}/`);
+  log(`从局域网访问：http://${lanIp() ?? listenHost}:${listenPort}/（监听 ${listenHost}）`);
   log(`停止：kill ${process.pid}（或 node lan-forward.mjs --status 查 pid）`);
 });
 

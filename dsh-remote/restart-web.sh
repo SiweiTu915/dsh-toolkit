@@ -84,12 +84,15 @@ fi
 # 会被 403 拒掉（表现：页面能开，但前端一直"重新连接"）。所以把 LAN authority
 # 显式声明为受信主机。IP 变了这里会跟着变，不需要手改。
 LAN_IP="$(/usr/sbin/ipconfig getifaddr en0 2>/dev/null || true)"
+LOCAL_IPS="$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | sort -u)"
 TRUST_ARGS=()
-if [ -n "$LAN_IP" ]; then
-  TRUST_ARGS+=(--trusted-host "${LAN_IP}:${PORT}")
-  echo "  局域网访问: http://${LAN_IP}:${PORT}/  (已声明 --trusted-host ${LAN_IP}:${PORT})"
+for ip in $LOCAL_IPS; do
+  TRUST_ARGS+=(--trusted-host "${ip}:${PORT}")
+done
+if [ -n "$LOCAL_IPS" ]; then
+  echo "  已声明受信 authority: $(echo $LOCAL_IPS | tr ' ' ',')  (端口 ${PORT})"
 else
-  echo "  (没取到 LAN IP，只监听回环)"
+  echo "  (没有非回环地址，只监听回环)"
 fi
 
 nohup "$DSH_BIN" web --port "$PORT" "${TRUST_ARGS[@]}" >"$LOG" 2>&1 &
@@ -114,19 +117,19 @@ if [ -z "$(holders)" ]; then
 fi
 
 # 5) 确保局域网转发器在跑（独立会话启动，不会被本 shell 的进程组回收）
-if [ -n "${LAN_IP_NOW:-}" ] && command -v node >/dev/null 2>&1; then
+if [ -n "${LAN_IP:-}" ] && command -v node >/dev/null 2>&1; then
   if ! node "$(dirname "$0")/lan-forward.mjs" --status 2>/dev/null | grep -q "在跑"; then
     python3 - "$(dirname "$0")/lan-forward.mjs" <<'PYEOF' >/dev/null 2>&1
 import subprocess, sys, os
 log = os.path.expanduser("~/.dsh/logs/lan-forward-3080.log")
 out = open(log, "a", buffering=1)
-subprocess.Popen(["node", sys.argv[1], "--listen-port", "3080", "--target-port", "3080"],
+subprocess.Popen(["node", sys.argv[1], "--listen-host", "0.0.0.0", "--listen-port", "3080", "--target-port", "3080"],
                  stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
 PYEOF
     sleep 1
-    echo "  已启动局域网转发器: http://${LAN_IP_NOW}:${PORT}/"
+    echo "  已启动局域网转发器(0.0.0.0:${PORT}): http://${LAN_IP}:${PORT}/"
   else
-    echo "  局域网转发器已在运行: http://${LAN_IP_NOW}:${PORT}/"
+    echo "  局域网转发器已在运行: http://${LAN_IP}:${PORT}/"
   fi
 fi
 
@@ -137,7 +140,7 @@ show
 echo "  直接打开: http://127.0.0.1:${PORT}/"
 # 登录链接每次启动都换 —— 直接把日志里那条 URL 的 host 换成本机 LAN 地址。
 # （不自己解析 token：一是没必要，二是这种"键=值"形态容易被敏感串扫描误判）
-LAN_IP_NOW="$(/usr/sbin/ipconfig getifaddr en0 2>/dev/null || true)"
+LAN_IP_NOW="${LAN_IP}"
 if [ -n "$LAN_IP_NOW" ]; then
   LAN_URL="$(grep -oE "http://127\.0\.0\.1:[0-9]+/\?[^ ]*" "$LOG" | tail -1 | sed "s@127\.0\.0\.1@${LAN_IP_NOW}@")"
   echo "  局域网: http://${LAN_IP_NOW}:${PORT}/"
